@@ -50,7 +50,11 @@ jobs:
 
       - name: Pre-download EasyOCR models for offline installs
         shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
           Push-Location python-core
           & ".\.venv\Scripts\python.exe" -c "from ocr import _get_reader; _get_reader(('ko','en')); _get_reader(('ru','en')); print('EasyOCR models ready')"
           Pop-Location
