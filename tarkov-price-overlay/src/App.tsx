@@ -3,32 +3,21 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, PhysicalPosition, LogicalSize, primaryMonitor, currentMonitor, availableMonitors } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { check as checkForAppUpdate, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { open as openFolderDialog, message, ask } from "@tauri-apps/plugin-dialog";
+import { open as openFolderDialog, ask } from "@tauri-apps/plugin-dialog";
 import { QRCodeSVG } from "qrcode.react";
 import { T, type Lang, type GameMode } from "./i18n";
 import "./App.css";
 
 declare const __APP_VERSION__: string;
 const APP_VERSION = __APP_VERSION__;
-const UPDATE_CHECK_KEY = "tarkov.autoCheckUpdate";
-// One-shot dismiss for the "run as administrator" diagnostic banner. We
-// remember it forever per machine so users who already moved to elevated
-// shortcuts never see it again. Clearing localStorage brings it back.
+// One-shot dismiss for the "run as administrator" diagnostic banner.
 const ADMIN_BANNER_DISMISS_KEY = "tarkov.adminBannerDismissed";
-// Server-driven announcement (editable live via /announcement-admin, no app
-// release). Shown at most once per local day, and again whenever the content
-// changes. ANNOUNCE_SEEN_KEY stores {id, date} of the last time we showed it.
-const ANNOUNCEMENT_ENDPOINT = "https://api.aquapado.com/priceoverlay/announcement";
-const ANNOUNCE_SEEN_KEY = "tarkov.announceSeen";
 // Hideout levels: {[stationId]: currentLevel}. Persisted across sessions.
 const HIDEOUT_LEVELS_KEY = "tarkov.hideoutLevels";
-
-function loadAutoCheckUpdate(): boolean {
-  const v = localStorage.getItem(UPDATE_CHECK_KEY);
-  return v == null ? true : v === "true";
-}
+// This privacy fork never performs background update checks. These links are
+// opened only after an explicit user click.
+const RELEASES_PAGE_URL = "https://github.com/JosephDemarest/tarkov-price-overlay/releases";
+const ISSUES_PAGE_URL = "https://github.com/JosephDemarest/tarkov-price-overlay/issues/new";
 
 type Diagnostics = {
   is_admin: boolean | null;
@@ -68,354 +57,11 @@ async function fetchDiagnostics(): Promise<Diagnostics | null> {
   }
 }
 
-type UpdateInfo = { version: string; notes: string | null };
-
-// Phases for the in-app updater UI:
-//   idle       — no update or user hasn't clicked Install yet
-//   downloading — bytes are streaming, show progress %
-//   ready      — download + signature verify done, installer is on disk;
-//                NSIS launches automatically on relaunch
-//   error      — download/verify/install threw; we surface the message
-type UpdatePhase = "idle" | "downloading" | "ready" | "error";
-const FEEDBACK_EMAIL = "floe9235@gmail.com";
 const KAKAOPAY_URL = "https://qr.kakaopay.com/Ej8AkkdEJ";
 const PAYPAL_URL = "https://paypal.me/tarkovoverlay";
 
-// Anonymous usage stats — user-controlled, opt-in. Points at the user's
-// own Cloudflare Worker (api.aquapado.com → D1) so all data lives on their
-// own infra; no third-party analytics service is involved. Failures are
-// always silent so a network blip never affects UX.
-const STATS_ENDPOINT = "https://api.aquapado.com/priceoverlay/events";
-const INSTALL_ID_KEY = "tarkov.installId";
-const STATS_CONSENT_KEY = "tarkov.statsConsent";
-
-// Public downloads page. Portable users get sent here from the update
-// banner instead of going through `update.downloadAndInstall()`, which
-// silently installs a *second* copy at the default NSIS path and leaves
-// the portable folder's exe pinned at the old version.
-const RELEASES_PAGE_URL =
-  "https://github.com/pado8/tarkov-price-overlay-releases/releases/latest";
-
-// Anonymous device identifier. The canonical copy lives in a machine-wide file
-// (%PROGRAMDATA%\TarkovPriceOverlay\install_id, written by the Rust backend),
-// so it stays stable across reinstalls, WebView2 cache wipes, portable↔installer
-// switches, and second Windows accounts — i.e. ONE id per physical PC. See the
-// resolve_install_id command in lib.rs. localStorage holds a mirror so reads are
-// synchronous; initInstallId() reconciles the two at startup.
-//
-// `cachedInstallId` is the reconciled machine id once initInstallId resolves.
-// Until then (and if the backend is unavailable) ensureInstallId falls back to
-// the localStorage value, generating one if absent.
-let cachedInstallId: string | null = null;
-const ensureInstallId = (): string => {
-  if (cachedInstallId) return cachedInstallId;
-  let id = localStorage.getItem(INSTALL_ID_KEY);
-  if (!id) {
-    // crypto.randomUUID is available in WebView2 / Tauri's webview.
-    id = crypto.randomUUID();
-    localStorage.setItem(INSTALL_ID_KEY, id);
-  }
-  return id;
-};
-
-// Resolve the machine-wide id via the Rust backend, seeding it with the current
-// localStorage id so an existing user's identity is PROMOTED (not reset) on the
-// first run of this build. Caches the result and mirrors it back into
-// localStorage so both stores agree. Must be awaited before the first reported
-// event so a reinstalled PC reports its original id, not a fresh localStorage
-// one. Failures keep the localStorage id (telemetry still works).
-const initInstallId = async (): Promise<void> => {
-  const seed = ensureInstallId();
-  try {
-    const id = await invoke<string>("resolve_install_id", { candidate: seed });
-    if (id && id.length >= 8) {
-      cachedInstallId = id;
-      localStorage.setItem(INSTALL_ID_KEY, id);
-    } else {
-      cachedInstallId = seed;
-    }
-  } catch {
-    cachedInstallId = seed;
-  }
-};
-
-// Opt-out model: anonymous stats are ON by default and only suppressed when
-// the user explicitly turns them off (a brief one-time notice tells them so,
-// without blocking). Absent key = enabled.
-const STATS_NOTICE_KEY = "tarkov.statsNoticeShown";
-const loadStatsEnabled = (): boolean =>
-  localStorage.getItem(STATS_CONSENT_KEY) !== "false";
-const loadStatsNoticeShown = (): boolean =>
-  localStorage.getItem(STATS_NOTICE_KEY) === "true";
-
-// Fire-and-forget event reporter. Skips only when the user has explicitly
-// disabled stats. `keepalive: true` lets the request finish even if the
-// renderer unloads (e.g. app close right after F2).
-//
-// Event types:
-//   launch          — app start (one per session)
-//   lookup          — F2 lookup that returned a priced item (success)
-//   lookup_nomatch  — F2 lookup matched no item (OCR/recognition miss)
-//   lookup_noprice  — matched an item with no market price (detail = public
-//                     catalog item id, NOT raw OCR/search text)
-//   hotkey          — the lookup hotkey binding at session start (detail =
-//                     "default" | "custom_key" | "custom_mouse"). Lets the
-//                     dashboard tell how many "never looked up" users simply
-//                     REBOUND the key off F2 (so they're not really inactive —
-//                     they press a different key) vs. a real activation gap.
-//   hotkey_fail     — registering the lookup hotkey threw (detail = the
-//                     accelerator that failed). A remapped key that collides
-//                     with another app's global shortcut silently does nothing,
-//                     which looks identical to "never tried" in the funnel.
-// lookup_nomatch/noprice are post-patch breakage signals: a spike after a game
-// update surfaces new/unrecognized items before users report it.
-// (ad_impression/ad_click still accepted server-side for old clients.)
-type StatsEvent =
-  | "launch"
-  | "lookup"
-  | "lookup_nomatch"
-  | "lookup_noprice"
-  | "hotkey"
-  | "hotkey_fail";
-// Telemetry is BATCHED to spare the stats DB's serverless compute budget.
-// Every event used to be its own POST → its own INSERT → its own wake of the
-// (autosuspending) Postgres compute, so a busy raid kept the DB awake all
-// session. Now the high-frequency lookup events are buffered and flushed as a
-// single multi-row write. Low-frequency signals (launch / hotkey, ~once per
-// session) still fire immediately so DAU and binding stats stay reliable even
-// if a session ends abruptly. Failures are always silent.
-type EventPayload = {
-  install_id: string;
-  event_type: StatsEvent;
-  version: string;
-  /** Occurrence time, stamped at enqueue. The server trusts this (within a
-   *  sane window) so events that sat in the retry queue — even across a
-   *  restart — are still filed on the day they actually happened. */
-  ts: number;
-  detail?: string;
-};
-
-// ── Durable, schedule-aligned telemetry queue ─────────────────────────────
-// 2026-07: the stats DB (Neon free tier) burned through its monthly compute
-// twice. Two root causes, both fixed here:
-//
-//  1. LOSS — the old queue lived in memory and was cleared the moment a POST
-//     was fired. A failed request (DB down: the 07-21→07-28 outage returned
-//     500 on every insert) silently dropped a whole batch, and closing the app
-//     dropped whatever hadn't flushed. Now the queue is persisted and entries
-//     are removed only after the server confirms the write.
-//  2. QUOTA — an autosuspending Postgres bills from the moment a write wakes
-//     it until it idles back out (~5 min). Clients each ran their own timer, so
-//     wakes were spread across the clock and the compute effectively never
-//     slept. Flushes are now ALIGNED to wall-clock boundaries: every client
-//     writes inside the same short window, so the DB wakes a couple of times an
-//     hour instead of continuously. That is the single biggest lever we have.
-//
-// Everything (including launch/hotkey) goes through the queue — a random-time
-// "immediate" send is exactly the isolated wake we're trying to avoid, and
-// delaying it costs nothing now that occurrence time travels with the event.
-const STATS_FLUSH_MS = 30 * 60 * 1000; // aligned window: :00 and :30
-// Small jitter so a few hundred clients don't hit the edge in the same
-// millisecond; still well inside one DB wake window.
-const STATS_JITTER_MS = 20_000;
-// Safety valve: a marathon session shouldn't hold thousands of rows in memory.
-// MUST NOT exceed the server's 100/req cap: the server silently truncates the
-// list but still returns 200, and flushStats drops the WHOLE batch from the
-// queue on success — anything past the cap would be lost, not retried.
-const STATS_MAX_BATCH = 100; // max rows sent per request (= server cap)
-const STATS_QUEUE_CAP = 500; // drop oldest beyond this (bounded localStorage)
-const STATS_QUEUE_KEY = "tarkov.stats.queue";
-
-let statsQueue: EventPayload[] = [];
-let statsFlushTimer: ReturnType<typeof setTimeout> | null = null;
-let statsFlushInFlight = false;
-
-function loadStatsQueue(): void {
-  try {
-    const raw = localStorage.getItem(STATS_QUEUE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      statsQueue = parsed.filter(
-        (e) => e && typeof e.install_id === "string" && typeof e.event_type === "string"
-      );
-    }
-  } catch {
-    /* corrupt entry — start clean rather than break startup */
-  }
-}
-
-function persistStatsQueue(): void {
-  try {
-    if (!statsQueue.length) localStorage.removeItem(STATS_QUEUE_KEY);
-    else localStorage.setItem(STATS_QUEUE_KEY, JSON.stringify(statsQueue));
-  } catch {
-    /* quota/serialization failure must never break the app */
-  }
-}
-
-/** POST a batch. Resolves true only when the server accepted it, so the caller
- *  knows whether the events may be dropped from the queue. */
-async function postStats(events: EventPayload[]): Promise<boolean> {
-  try {
-    const r = await fetch(STATS_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ events }),
-      keepalive: true,
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function flushStats(): Promise<void> {
-  if (statsFlushInFlight || !statsQueue.length) return;
-  statsFlushInFlight = true;
-  try {
-    // Snapshot the head of the queue; anything enqueued mid-flight stays put.
-    const batch = statsQueue.slice(0, STATS_MAX_BATCH);
-    const ok = await postStats(batch);
-    if (ok) {
-      statsQueue = statsQueue.slice(batch.length);
-      persistStatsQueue();
-    }
-    // On failure the queue is untouched — the next aligned window retries.
-  } finally {
-    statsFlushInFlight = false;
-  }
-}
-
-/** Milliseconds until the next wall-clock-aligned flush window. */
-function msToNextFlushWindow(): number {
-  const now = Date.now();
-  const next = Math.ceil(now / STATS_FLUSH_MS) * STATS_FLUSH_MS;
-  return next - now + Math.floor(Math.random() * STATS_JITTER_MS);
-}
-
-function scheduleStatsFlush(): void {
-  if (statsFlushTimer != null) return;
-  statsFlushTimer = setTimeout(async () => {
-    statsFlushTimer = null;
-    await flushStats();
-    // Anything left means the send failed (or arrived mid-flight): keep the
-    // cadence so the next window retries. New events re-arm the timer
-    // themselves, so an empty queue simply stops scheduling.
-    if (statsQueue.length) scheduleStatsFlush();
-  }, msToNextFlushWindow());
-}
-
-const reportEvent = (eventType: StatsEvent, detail?: string) => {
-  if (!loadStatsEnabled()) return;
-  statsQueue.push({
-    install_id: ensureInstallId(),
-    event_type: eventType,
-    version: APP_VERSION,
-    ts: Date.now(),
-    ...(detail ? { detail } : {}),
-  });
-  if (statsQueue.length > STATS_QUEUE_CAP) {
-    statsQueue = statsQueue.slice(statsQueue.length - STATS_QUEUE_CAP);
-  }
-  persistStatsQueue();
-  scheduleStatsFlush();
-};
-
-// Startup: adopt anything a previous session couldn't deliver (app closed
-// before a window, or the DB was down) and put it on the next window.
-if (typeof window !== "undefined") {
-  loadStatsQueue();
-  if (statsQueue.length) scheduleStatsFlush();
-  // Persist-only on teardown. We deliberately do NOT fire a send here: an
-  // unload-time POST is an isolated, random-time DB wake, and the queue now
-  // survives to the next launch anyway.
-  window.addEventListener("beforeunload", persistStatsQueue);
-}
-
-// Privacy-preserving nomatch reason for telemetry — NEVER the raw OCR text,
-// just a coarse category so the dashboard can tell a capture/alignment miss
-// ("empty" = nothing read, "junk" = too short / no letters → region likely
-// misaligned) apart from a genuine OCR misread or new item ("no_match").
-function nomatchCategory(raw?: string | null): string {
-  const t = (raw || "").trim();
-  if (!t) return "empty";
-  if (t.length < 3 || !/[a-zA-Z가-힣]/.test(t)) return "junk";
-  return "no_match";
-}
-
 const hideToTray = () => {
   invoke("hide_to_tray").catch(() => {});
-};
-
-// Mailto fallback — kept as a secondary option for users who'd rather email
-// (e.g. to attach a screenshot). The primary path is now the in-app form
-// that POSTs to FEEDBACK_ENDPOINT so feedback lands in the DB directly.
-const sendFeedback = (lang: Lang) => {
-  const t = T[lang];
-  const subject = encodeURIComponent(t.feedbackSubject);
-  const body = encodeURIComponent(
-    t.feedbackBody.replace("{version}", APP_VERSION)
-  );
-  const url = `mailto:${FEEDBACK_EMAIL}?subject=${subject}&body=${body}`;
-  openUrl(url).catch((e) => {
-    log(`feedback: openUrl failed — ${String(e)}`);
-  });
-};
-
-// Downscale + compress an image blob to a JPEG data URL so feedback
-// screenshots stay small (~100KB) for the base64-in-DB store. Caps the
-// longest edge at 1280px; falls back to the original data URL if anything
-// in the canvas path throws.
-const MAX_IMG_EDGE = 1280;
-const compressImage = (blob: Blob): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const scale = Math.min(1, MAX_IMG_EDGE / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("no 2d context");
-        ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", 0.7));
-      } catch (e) {
-        reject(e);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("image decode failed"));
-    };
-    img.src = url;
-  });
-
-// In-app feedback → user's own backend (api.aquapado.com → Neon). Explicit
-// user action, so NOT gated on stats consent. install_id is attached so the
-// dev can spot duplicate reports from one user; it's an anonymous UUID.
-const FEEDBACK_ENDPOINT = "https://api.aquapado.com/priceoverlay/feedback";
-const submitFeedback = async (
-  message: string,
-  image?: string | null
-): Promise<void> => {
-  const res = await fetch(FEEDBACK_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      install_id: ensureInstallId(),
-      version: APP_VERSION,
-      message,
-      ...(image ? { image } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 };
 
 
@@ -938,16 +584,6 @@ function isMouseHotkey(s: string): s is MouseHotkey {
   return s === "MouseMiddle" || s === "MouseX1" || s === "MouseX2";
 }
 
-/** Coarse classification of the lookup hotkey for anonymous telemetry — never
- *  the raw key, just whether the user is on the default F2, a custom keyboard
- *  key, or a mouse button. Powers the "are the 'never pressed F2' users just
- *  people who rebound the key?" analysis. */
-function hotkeyKind(hk: string): "default" | "custom_key" | "custom_mouse" {
-  if (hk === DEFAULT_HOTKEY) return "default";
-  if (isMouseHotkey(hk)) return "custom_mouse";
-  return "custom_key";
-}
-
 /** MouseEvent.button → our hotkey string, or null for buttons we refuse to
  *  bind. Left/right click are reserved for normal UI / game input — binding
  *  them would steal every click. */
@@ -1135,21 +771,6 @@ function App() {
   const [adminDismissed, setAdminDismissed] = useState<boolean>(
     () => localStorage.getItem(ADMIN_BANNER_DISMISS_KEY) === "true"
   );
-  // Server-driven announcement to show on launch (null = nothing to show).
-  const [remoteAnnounce, setRemoteAnnounce] = useState<
-    { id: number; ko: string; en: string; ru: string } | null
-  >(null);
-  // Anonymous stats are opt-out: enabled by default, with a one-time
-  // informational notice (not a blocking consent gate).
-  const [statsEnabled, setStatsEnabled] = useState<boolean>(loadStatsEnabled);
-  const [statsNoticeShown, setStatsNoticeShown] = useState<boolean>(
-    loadStatsNoticeShown
-  );
-  // True when the running exe was launched from a portable ZIP (detected
-  // via the `_portable.marker` file dropped by portable.ps1). Portable
-  // users see a "open downloads page" link instead of the in-app NSIS
-  // installer flow, which would install a second copy elsewhere.
-  const [isPortable, setIsPortable] = useState<boolean>(false);
   const [hideoutLevels, setHideoutLevels] = useState<Record<string, number>>(
     () => {
       try {
@@ -1204,35 +825,11 @@ function App() {
   const resizingRef = useRef(false);
   const [historyVisible, setHistoryVisible] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
-  const [autoCheckUpdate, setAutoCheckUpdate] = useState<boolean>(
-    loadAutoCheckUpdate
-  );
   const [questStatus, setQuestStatus] = useState<QuestStatus | null>(null);
   const [questPathInput, setQuestPathInput] = useState<string>("");
   const [questDisplayMode, setQuestDisplayMode] = useState<"pvp" | "pve" | "season">(
     loadQuestDisplayMode
   );
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null);
-  const [updateChecking, setUpdateChecking] = useState<boolean>(false);
-  const [updateCheckedAt, setUpdateCheckedAt] = useState<number | null>(null);
-  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("idle");
-  const [updateProgress, setUpdateProgress] = useState<number>(0);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  // Hold the Update handle returned by check() so the Install button can
-  // call downloadAndInstall on the same object the user just saw. We keep
-  // it in a ref (not state) because mutating it shouldn't trigger renders
-  // and it's not part of the rendered UI.
-  const pendingUpdateRef = useRef<Update | null>(null);
-  // In-app feedback form (posts to the DB). Mutually exclusive with the
-  // donate panel so the two don't stack.
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
-  // Attached screenshot as a compressed JPEG data URL (null = none).
-  const [feedbackImage, setFeedbackImage] = useState<string | null>(null);
-  const [feedbackStatus, setFeedbackStatus] = useState<
-    "idle" | "sending" | "sent" | "error"
-  >("idle");
   const [showDonate, setShowDonate] = useState(false);
   // Default donate tab follows the user's UI language (Korean → KakaoPay first,
   // others → PayPal first). They can flip with the tabs.
@@ -1334,60 +931,6 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // Anonymous launch ping. Opt-out: fires by default, suppressed only if the
-  // user previously turned stats off. reportEvent rechecks at call-time, so
-  // toggling off mid-session also stops future pings.
-  useEffect(() => {
-    // Resolve the machine-wide install id FIRST so a reinstalled PC reports its
-    // original id instead of a fresh localStorage one (see initInstallId).
-    void (async () => {
-      await initInstallId();
-      reportEvent("launch");
-      // Hotkey binding at session start (default / custom_key / custom_mouse).
-      // Read straight from storage so it reflects the persisted choice, not a
-      // mid-session edit. Lets the dashboard split the "never looked up" cohort
-      // into "rebound the key" vs. a true activation gap.
-      reportEvent("hotkey", hotkeyKind(loadHotkey()));
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // One-shot check on mount: is this exe the portable distribution?
-  // Cached for the session — the marker file doesn't move while the app
-  // runs. Result drives the update-banner UI (Install vs Open page).
-  useEffect(() => {
-    invoke<boolean>("is_portable_install")
-      .then((v) => {
-        setIsPortable(v);
-        log(`portable: ${v}`);
-      })
-      .catch(() => {});
-  }, []);
-
-  // Fetch the server-driven announcement on launch. Show it at most once per
-  // local day, and again whenever the content (id = updated_at) changes —
-  // even same day. Marking it seen the moment we decide to show it means a
-  // same-day relaunch won't repeat it. Silent on any failure.
-  useEffect(() => {
-    fetch(ANNOUNCEMENT_ENDPOINT)
-      .then((r) => r.json())
-      .then((a) => {
-        if (!a || !a.active || (!a.ko && !a.en && !a.ru)) return;
-        const today = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD local
-        let seen: { id?: number; date?: string } = {};
-        try {
-          seen = JSON.parse(localStorage.getItem(ANNOUNCE_SEEN_KEY) || "{}");
-        } catch {}
-        if (seen.id === a.id && seen.date === today) return; // already shown today
-        localStorage.setItem(
-          ANNOUNCE_SEEN_KEY,
-          JSON.stringify({ id: a.id, date: today })
-        );
-        setRemoteAnnounce({ id: a.id, ko: a.ko ?? "", en: a.en ?? "", ru: a.ru ?? "" });
-      })
-      .catch(() => {});
   }, []);
 
   // Live capture-region preview: while the user is editing offsets, two
@@ -1777,7 +1320,6 @@ function App() {
           // A binding that won't register silently does nothing — the user
           // presses their key and nothing happens, which is indistinguishable
           // from "never tried" in the funnel. Surface it.
-          reportEvent("hotkey_fail", hotkey);
         });
     } else {
       invoke("register_lookup_mouse", { button: "" }).catch(() => {});
@@ -1785,7 +1327,6 @@ function App() {
         .then(() => log(`React: lookup hotkey = ${hotkey}`))
         .catch((e) => {
           log(`React: lookup hotkey FAILED (${hotkey}): ${e}`);
-          reportEvent("hotkey_fail", hotkey);
         });
     }
   }, [hotkey]);
@@ -1813,14 +1354,9 @@ function App() {
     localStorage.setItem(SOUND_KEY, String(soundOn));
   }, [soundOn]);
 
-  useEffect(() => {
-    localStorage.setItem(UPDATE_CHECK_KEY, String(autoCheckUpdate));
-  }, [autoCheckUpdate]);
-
   // Probe sidecar diagnostics on mount, retrying until it answers (the sidecar
   // can take >3s on a cold start while it loads OCR models). Drives the admin-
-  // rights banner and the elevation telemetry.
-  const adminReportedRef = useRef(false);
+  // rights banner.
   useEffect(() => {
     let mounted = true;
     let tries = 0;
@@ -1830,21 +1366,11 @@ function App() {
       if (!mounted) return;
       if (info) {
         setAdminInfo(info);
-        // Elevation telemetry (once/session): tag a launch event with the
-        // admin status so the dashboard can measure how many users — and
-        // especially the "never looked up" cohort — run non-elevated. That's
-        // the prime suspect for F2 silently failing against admin-elevated
-        // Tarkov (Windows UIPI). Harmless launch double-count: every funnel /
-        // DAU metric counts DISTINCT install_id, so it's unaffected.
-        if (!adminReportedRef.current && info.is_admin != null) {
-          adminReportedRef.current = true;
-          reportEvent("launch", info.is_admin ? "admin" : "user");
-        }
         return; // got a result — stop retrying
       }
       // Sidecar not ready yet: a cold start loads the OCR models first and can
       // take well over 3s. Retry (every 2s, ~24s cap) so the admin-rights
-      // banner and the elevation telemetry don't silently miss on cold boots.
+      // banner doesn't silently miss on cold boots.
       if (++tries < 12) timer = window.setTimeout(probe, 2000);
     };
     probe();
@@ -1883,126 +1409,6 @@ function App() {
       mounted = false;
     };
   }, [result?.caliber]);
-
-  // Update check + install. Uses Tauri's updater plugin: it fetches
-  // latest.json from the configured endpoint, verifies the embedded
-  // ed25519 signature against the pubkey baked into the app, and
-  // returns an Update handle whose downloadAndInstall() streams the
-  // signed installer to disk and launches it.
-  // Refs for the periodic re-check: its interval closure is created once on
-  // mount, so it must read CURRENT state via refs — and it must never fire
-  // mid-download (a tick during "downloading" reset the phase to idle,
-  // killing the progress bar and re-arming the install button).
-  const updateCheckingRef = useRef(false);
-  const updatePhaseRef = useRef<UpdatePhase>("idle");
-  useEffect(() => {
-    updatePhaseRef.current = updatePhase;
-  }, [updatePhase]);
-  const checkForUpdate = async () => {
-    // Block only while an install is genuinely in progress. "error" must
-    // NOT block: otherwise one failed download froze update checks forever
-    // (4h ticks + the manual button all silently no-oped until restart).
-    if (
-      updateCheckingRef.current ||
-      updatePhaseRef.current === "downloading" ||
-      updatePhaseRef.current === "ready"
-    )
-      return;
-    updateCheckingRef.current = true;
-    setUpdateChecking(true);
-    setUpdateError(null);
-    // If we're re-checking after a prior install failure, drop the stale
-    // "error" phase now. Otherwise the banner keeps rendering the error branch
-    // ("⚠ update error: ") with an empty message for the whole network
-    // round-trip, since we just cleared updateError but not the phase.
-    if (updatePhaseRef.current === "error") setUpdatePhase("idle");
-    try {
-      const update = await checkForAppUpdate();
-      setUpdateCheckedAt(Date.now());
-      if (update) {
-        pendingUpdateRef.current = update;
-        setUpdateInfo({ version: update.version, notes: update.body ?? null });
-        setUpdatePhase("idle");
-        log(`update: ${APP_VERSION} -> ${update.version} available`);
-      } else {
-        pendingUpdateRef.current = null;
-        setUpdateInfo(null);
-        log(`update: up to date (${APP_VERSION})`);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      log(`update: check failed — ${msg}`);
-      setUpdateError(msg);
-      // Keep any previously-seen updateInfo: a transient network failure on
-      // a periodic re-check must not erase a valid update banner for 4h.
-    } finally {
-      updateCheckingRef.current = false;
-      setUpdateChecking(false);
-    }
-  };
-
-  const installUpdate = async () => {
-    const update = pendingUpdateRef.current;
-    if (!update) return;
-    // Tell the user what's about to happen: the app closes and the installer
-    // downloads + launches with a gap before the setup window appears. Without
-    // this, that silent gap reads like the update stalled. (t is the active
-    // language strings.)
-    await message(t.updateStartGuide, { title: t.updateStartTitle, kind: "info" });
-    setUpdatePhase("downloading");
-    setUpdateProgress(0);
-    setUpdateError(null);
-    let downloaded = 0;
-    let total = 0;
-    try {
-      await update.downloadAndInstall((event) => {
-        // Plugin emits three event kinds: Started (total size known),
-        // Progress (chunk bytes), Finished (download+verify done; NSIS
-        // about to spawn). We translate to a 0–100 percent so the
-        // banner can render a progress bar without remembering bytes.
-        if (event.event === "Started") {
-          total = event.data.contentLength ?? 0;
-        } else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          if (total > 0) {
-            setUpdateProgress(Math.min(100, Math.round((downloaded / total) * 100)));
-          }
-        } else if (event.event === "Finished") {
-          setUpdateProgress(100);
-        }
-      });
-      setUpdatePhase("ready");
-      log(`update: installed ${update.version}, relaunching`);
-      await relaunch();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      log(`update: install failed — ${msg}`);
-      setUpdateError(msg);
-      setUpdatePhase("error");
-    }
-  };
-
-  // Auto-check shortly after mount, then every 4h while running. The overlay
-  // is tray-resident and often stays up for DAYS — a single startup check
-  // meant long-running sessions never learned about new releases, which is
-  // why update adoption lagged. Periodic re-checks close that gap.
-  useEffect(() => {
-    // deps on the toggle: turning auto-check OFF mid-session must actually
-    // stop the 4h interval (with [] deps the mount-time closure kept firing
-    // until restart — meaningful for a tray-resident app).
-    if (!autoCheckUpdate) return;
-    const t = window.setTimeout(() => {
-      checkForUpdate();
-    }, 3000);
-    const iv = window.setInterval(() => {
-      checkForUpdate();
-    }, 4 * 60 * 60 * 1000);
-    return () => {
-      clearTimeout(t);
-      clearInterval(iv);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoCheckUpdate]);
 
   // Hideout levels helpers
   const updateHideoutLevel = (stationId: string, level: number) => {
@@ -2503,28 +1909,6 @@ function App() {
             setHistory(addToHistory(data));
           }
           if (loadSoundOn()) playDing(data.item_name != null);
-          // Outcome telemetry (breakage detection): classify the lookup.
-          // "wide_" prefix = the zoom-out rescue produced this read; without
-          // it, rescue-read text silently migrates capture-miss events from
-          // "empty" into "no_match" and the misread-vs-misaligned split on
-          // the dashboard stops meaning anything.
-          if (data.item_name == null) {
-            const pfx = data.attempt === "wide" ? "wide_" : "";
-            reportEvent("lookup_nomatch", pfx + nomatchCategory(data.raw_text));
-          } else if (data.flea_price == null && data.trader_price == null) {
-            // Matched but untradeable / no market price — send the public
-            // catalog id so the dashboard shows WHICH items (e.g. new patch
-            // items) are surfacing as priceless.
-            reportEvent("lookup_noprice", data.item_id ?? undefined);
-          } else {
-            // Tag wide-rescue successes too: without it the rescue's hit
-            // rate (and its false positives) hide inside plain "lookup" and
-            // the rescue's precision can never be measured post-release.
-            reportEvent(
-              "lookup",
-              data.attempt === "wide" ? "wide" : undefined
-            );
-          }
         } catch (e) {
           const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
           log(`React: fetch ERROR ${msg}`);
@@ -2543,10 +1927,6 @@ function App() {
           );
           setStatus("error");
           if (loadSoundOn()) playDing(false);
-          // Tag transport failures so they don't inflate the SUCCESS count:
-          // before this, cp949-500s and connection errors were reported as
-          // plain "lookup" and the dashboard's ok/fail split was wrong.
-          reportEvent("lookup", "fetch_error");
         } finally {
           clearTimeout(timeoutId);
           // Only the CURRENT generation may end the in-flight state and
@@ -2666,19 +2046,6 @@ function App() {
       setStatus("success");
       setHistory(addToHistory(data));
       if (loadSoundOn()) playDing(data.item_name != null);
-      // Same outcome telemetry as the F2 path — manual ("직접 입력") and
-      // history re-lookups were previously invisible to the dashboard, which
-      // under-counted real lookup volume. (Doesn't affect the activation
-      // funnel: reaching this path requires a prior F2 result anyway.)
-      // "manual_" prefix: a manual-input typo is NOT an OCR misread signal —
-      // mixing them into the same buckets polluted the failure diagnostics.
-      if (data.item_name == null) {
-        reportEvent("lookup_nomatch", "manual_" + nomatchCategory(data.raw_text));
-      } else if (data.flea_price == null && data.trader_price == null) {
-        reportEvent("lookup_noprice", data.item_id ?? undefined);
-      } else {
-        reportEvent("lookup");
-      }
     } catch (e) {
       const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       if (seq !== lookupSeqRef.current) return; // stale failure — ignore
@@ -2697,7 +2064,6 @@ function App() {
       );
       setStatus("error");
       if (loadSoundOn()) playDing(false);
-      reportEvent("lookup", "fetch_error");
     } finally {
       clearTimeout(timeoutId);
       if (seq === lookupSeqRef.current) {
@@ -2894,7 +2260,7 @@ function App() {
             window via the header — that's the only move affordance in a
             borderless window. */}
         <div className="header" data-tauri-drag-region={pinned ? undefined : true}>
-          <span className="title" data-tauri-drag-region={pinned ? undefined : true}>{t.title}</span>
+          <span className="title" data-tauri-drag-region={pinned ? undefined : true}>{t.title} <span className="privacy-badge">PRIVACY FORK</span></span>
           <div className="header-actions">
             <span className="hotkey" data-tauri-drag-region={pinned ? undefined : true}>
               {/* Mouse bindings carry their own 🖱 prefix from
@@ -2975,131 +2341,6 @@ function App() {
           </div>
         </div>
 
-        {!statsNoticeShown && (
-          <div className="consent-banner">
-            <div className="consent-opensource">{t.statsConsentOpenSource}</div>
-            <div className="consent-text">{t.statsConsentBody}</div>
-            <div className="consent-actions">
-              <button
-                className="reset-btn consent-btn-accept"
-                onClick={() => {
-                  // "Got it" — dismiss the one-time notice; stats stay on.
-                  localStorage.setItem(STATS_NOTICE_KEY, "true");
-                  setStatsNoticeShown(true);
-                }}
-              >
-                {t.statsConsentAccept}
-              </button>
-              <button
-                className="reset-btn"
-                onClick={() => {
-                  // Turn stats off and dismiss the notice in one click.
-                  localStorage.setItem(STATS_CONSENT_KEY, "false");
-                  localStorage.setItem(STATS_NOTICE_KEY, "true");
-                  setStatsEnabled(false);
-                  setStatsNoticeShown(true);
-                }}
-              >
-                {t.statsConsentDecline}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {updateInfo && updateInfo.version !== dismissedUpdate && (
-          <div className="update-banner">
-            {updatePhase === "idle" && (
-              <>
-                <span className="update-text">
-                  🆕 {t.updateAvailable} <strong>v{updateInfo.version}</strong>
-                  {/* One-line release notes: seeing WHAT the update brings is
-                      the cheapest adoption nudge there is. */}
-                  {updateInfo.notes && (
-                    <span className="update-notes">
-                      {" "}— {updateInfo.notes.split("\n")[0].slice(0, 120)}
-                    </span>
-                  )}
-                  {isPortable && (
-                    <span className="update-portable-hint">
-                      {" "}— {t.updatePortableHint}
-                    </span>
-                  )}
-                </span>
-                {isPortable ? (
-                  // Portable users: send them to the downloads page rather
-                  // than firing downloadAndInstall(), which would install a
-                  // second copy at the default NSIS path and leave the
-                  // portable folder untouched.
-                  <button
-                    className="reset-btn update-btn"
-                    onClick={() =>
-                      openUrl(RELEASES_PAGE_URL).catch((e) =>
-                        log(`update: open releases page failed — ${String(e)}`)
-                      )
-                    }
-                    title={t.updatePortableHint}
-                  >
-                    {t.updateOpenPage}
-                  </button>
-                ) : (
-                  <button
-                    className="reset-btn update-btn"
-                    onClick={installUpdate}
-                  >
-                    {t.updateInstall}
-                  </button>
-                )}
-                <button
-                  className="settings-btn"
-                  onClick={() => setDismissedUpdate(updateInfo.version)}
-                  title={t.updateLater}
-                >
-                  ✕
-                </button>
-              </>
-            )}
-            {updatePhase === "downloading" && (
-              <span className="update-text update-progress-wrap">
-                ⬇ {t.updateDownloading} {updateProgress}%
-                <span className="update-progress-track" aria-hidden="true">
-                  <span
-                    className="update-progress-fill"
-                    style={{ width: `${updateProgress}%` }}
-                  />
-                </span>
-              </span>
-            )}
-            {updatePhase === "ready" && (
-              <span className="update-text">✓ {t.updateRestarting}</span>
-            )}
-            {updatePhase === "error" && (
-              <>
-                <span className="update-text">
-                  ⚠ {t.updateError}: {updateError}
-                </span>
-                <button
-                  className="reset-btn update-btn"
-                  onClick={installUpdate}
-                >
-                  {t.updateRetry}
-                </button>
-                <button
-                  className="settings-btn"
-                  onClick={() => {
-                    // Dismissable error: reset to idle so periodic checks
-                    // resume, and mute this version's banner.
-                    setUpdatePhase("idle");
-                    setUpdateError(null);
-                    setDismissedUpdate(updateInfo.version);
-                  }}
-                  title={t.updateLater}
-                >
-                  ✕
-                </button>
-              </>
-            )}
-          </div>
-        )}
 
         {adminInfo &&
           adminInfo.is_admin === false &&
@@ -3132,29 +2373,6 @@ function App() {
           </div>
         )}
 
-        {remoteAnnounce &&
-          (region.lang === "ko"
-            ? remoteAnnounce.ko || remoteAnnounce.en
-            : region.lang === "ru"
-              ? remoteAnnounce.ru || remoteAnnounce.en || remoteAnnounce.ko
-              : remoteAnnounce.en || remoteAnnounce.ko) && (
-            <div className="announce-banner">
-              <span className="announce-text">
-                {region.lang === "ko"
-                  ? remoteAnnounce.ko || remoteAnnounce.en
-                  : region.lang === "ru"
-                    ? remoteAnnounce.ru || remoteAnnounce.en || remoteAnnounce.ko
-                    : remoteAnnounce.en || remoteAnnounce.ko}
-              </span>
-              <button
-                className="settings-btn"
-                onClick={() => setRemoteAnnounce(null)}
-                title={t.dismiss}
-              >
-                ✕
-              </button>
-            </div>
-          )}
 
         {historyVisible && (
           <div className="history-panel">
@@ -3212,133 +2430,25 @@ function App() {
             <div className="settings-row settings-feedback-row">
               <button
                 className="reset-btn feedback-btn"
-                onClick={() => {
-                  setShowFeedback((s) => !s);
-                  setFeedbackStatus("idle");
-                  setShowDonate(false);
-                }}
+                onClick={() =>
+                  openUrl(ISSUES_PAGE_URL).catch((e) =>
+                    log(`issues: open failed — ${String(e)}`)
+                  )
+                }
               >
-                ✉ {t.feedback}
+                🐛 {t.feedback}
               </button>
               <button
                 className="reset-btn donate-btn"
                 onClick={() => {
                   setShowDonate((s) => !s);
                   setDonateCopied(false);
-                  setShowFeedback(false);
                 }}
                 title={t.donateTitle}
               >
                 💝 {t.donate}
               </button>
             </div>
-            {showFeedback && (
-              <div className="feedback-panel">
-                <textarea
-                  className="feedback-textarea"
-                  value={feedbackText}
-                  onChange={(e) => setFeedbackText(e.target.value)}
-                  onPaste={(e) => {
-                    // Pasting a screenshot (Win+Shift+S → Ctrl+V) attaches it.
-                    const item = Array.from(e.clipboardData.items).find((it) =>
-                      it.type.startsWith("image/")
-                    );
-                    const blob = item?.getAsFile();
-                    if (blob) {
-                      e.preventDefault();
-                      compressImage(blob)
-                        .then(setFeedbackImage)
-                        .catch((err) =>
-                          log(`feedback: image paste failed — ${String(err)}`)
-                        );
-                    }
-                  }}
-                  placeholder={t.feedbackPlaceholder}
-                  rows={4}
-                  maxLength={4000}
-                  disabled={feedbackStatus === "sending"}
-                />
-                <div className="feedback-attach-row">
-                  {feedbackImage ? (
-                    <div className="feedback-thumb">
-                      <img src={feedbackImage} alt="" />
-                      <button
-                        className="feedback-thumb-x"
-                        title={t.feedbackImageRemove}
-                        onClick={() => setFeedbackImage(null)}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="feedback-attach-label">
-                      📎 {t.feedbackAttachImage}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        style={{ display: "none" }}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f)
-                            compressImage(f)
-                              .then(setFeedbackImage)
-                              .catch((err) =>
-                                log(`feedback: image pick failed — ${String(err)}`)
-                              );
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
-                  )}
-                </div>
-                <div className="feedback-actions">
-                  <span
-                    className={`feedback-status${
-                      feedbackStatus === "error" ? " error" : ""
-                    }${feedbackStatus === "sent" ? " sent" : ""}`}
-                  >
-                    {feedbackStatus === "sending" && t.feedbackSending}
-                    {feedbackStatus === "sent" && t.feedbackSuccess}
-                    {feedbackStatus === "error" && t.feedbackError}
-                  </span>
-                  <button
-                    className="reset-btn feedback-send-btn"
-                    disabled={feedbackStatus === "sending"}
-                    onClick={async () => {
-                      const msg = feedbackText.trim();
-                      if (!msg) {
-                        setFeedbackStatus("error");
-                        return;
-                      }
-                      setFeedbackStatus("sending");
-                      try {
-                        await submitFeedback(msg, feedbackImage);
-                        setFeedbackStatus("sent");
-                        setFeedbackText("");
-                        setFeedbackImage(null);
-                        // Auto-close shortly after a successful send.
-                        window.setTimeout(() => {
-                          setShowFeedback(false);
-                          setFeedbackStatus("idle");
-                        }, 1500);
-                      } catch (err) {
-                        log(`feedback: submit failed — ${String(err)}`);
-                        setFeedbackStatus("error");
-                      }
-                    }}
-                  >
-                    {t.feedbackSend}
-                  </button>
-                </div>
-                <button
-                  className="feedback-mail-link"
-                  onClick={() => sendFeedback(region.lang)}
-                  title={`mailto:${FEEDBACK_EMAIL}`}
-                >
-                  {t.feedbackOr} {t.feedbackAltMail}
-                </button>
-              </div>
-            )}
             {showDonate && (() => {
               const activeUrl = donateTab === "kakao" ? KAKAOPAY_URL : PAYPAL_URL;
               const activeHint =
@@ -3420,21 +2530,6 @@ function App() {
                 </div>
               );
             })()}
-            <div className="settings-row" title={t.statsToggleHint}>
-              <label>{t.statsToggle}</label>
-              <input
-                type="checkbox"
-                checked={statsEnabled}
-                onChange={(e) => {
-                  const enabled = e.target.checked;
-                  localStorage.setItem(
-                    STATS_CONSENT_KEY,
-                    enabled ? "true" : "false"
-                  );
-                  setStatsEnabled(enabled);
-                }}
-              />
-            </div>
             <div className="settings-row">
               <label>{t.language}</label>
               <select
@@ -3512,38 +2607,16 @@ function App() {
               />
             </div>
             <div className="settings-row">
-              <label>{t.autoCheckUpdate}</label>
-              <input
-                type="checkbox"
-                checked={autoCheckUpdate}
-                onChange={(e) => setAutoCheckUpdate(e.target.checked)}
-              />
-            </div>
-            <div className="settings-row">
-              <label>
-                {t.update}
-                <span className="settings-hint-inline">
-                  {" "}
-                  v{APP_VERSION}
-                </span>
-              </label>
+              <label>v{APP_VERSION}</label>
               <button
                 className="reset-btn"
-                onClick={() => {
-                  // Clear any earlier dismissal: a user who hid an update and
-                  // then explicitly clicks "check" wants to SEE it again —
-                  // otherwise the banner stays muted (updateInfo.version ===
-                  // dismissedUpdate) and the click looks like it did nothing.
-                  setDismissedUpdate(null);
-                  checkForUpdate();
-                }}
-                disabled={updateChecking}
+                onClick={() =>
+                  openUrl(RELEASES_PAGE_URL).catch((e) =>
+                    log(`releases: open failed — ${String(e)}`)
+                  )
+                }
               >
-                {updateChecking
-                  ? t.updateChecking
-                  : updateCheckedAt && !updateInfo
-                    ? t.updateUpToDate
-                    : t.updateCheckNow}
+                {t.updateOpenPage}
               </button>
             </div>
             <div className="settings-row" title={t.autoHideHint}>

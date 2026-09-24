@@ -75,7 +75,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -84,7 +84,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/tarkov-server"],
+    "externalBin": [
+      "binaries/tarkov-server"
+    ],
     "resources": {
       "binaries/_internal": "_internal"
     },
@@ -92,14 +94,6 @@
       "nsis": {
         "installerHooks": "installer-hooks.nsh"
       }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/pado8/tarkov-price-overlay-releases/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI0QTI0NTIzQkYyNjdFRUIKUldUcmZpYS9JMFdpSkJMcFJzcXBuMGVPdUMyZytaaFdBUUJjaEZpWXVpdHZXNjgxNnBKeUxVSHMK"
     }
   }
 }

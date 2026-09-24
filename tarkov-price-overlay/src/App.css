@@ -1573,3 +1573,12 @@ html, body, #root {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* Modified build marker required by the upstream MIT distribution note. */
+.privacy-badge {
+  margin-left: 0.35em;
+  font-size: 0.62em;
+  letter-spacing: 0.08em;
+  opacity: 0.72;
+  white-space: nowrap;
+}
