@@ -210,6 +210,7 @@ type LookupResult = {
   icon: string | null;
   /** Fandom wiki page. Null for items the catalog has no page for. */
   wiki: string | null;
+  base_price: number | null;
   flea_price: number | null;
   flea_low_24h: number | null;
   flea_high_24h: number | null;
@@ -240,6 +241,96 @@ type LookupResult = {
   attempt?: string | null;
 };
 
+type FleaConfig = {
+  sell_offer_fee_rate: number;
+  sell_requirement_fee_rate: number;
+};
+
+type Verdict = {
+  kind: "keep" | "flea" | "trader" | "hold";
+  label: string;
+  reason: string;
+  fleaFee: number | null;
+  fleaNet: number | null;
+  bestTrader: TraderPrice | null;
+};
+
+function projectedQuestStatus(q: TaskRef, mode: "pvp" | "pve" | "season") {
+  return q.task_status_by_mode?.[mode] ?? q.task_status;
+}
+
+/** Same equation used by tarkov.dev Item.fleaMarketFee.
+ * No Intelligence Center / Hideout Management discount is applied, so the
+ * estimate is conservative for progressed accounts. */
+function estimateFleaFee(
+  basePrice: number | null,
+  listingPrice: number | null,
+  cfg: FleaConfig | null
+): number | null {
+  if (!basePrice || !listingPrice || !cfg || basePrice <= 0 || listingPrice <= 0)
+    return null;
+  const vo = basePrice;
+  const vr = listingPrice;
+  let po = Math.log10(vo / vr);
+  if (vr < vo) po = Math.pow(po, 1.08);
+  let pr = Math.log10(vr / vo);
+  if (vr >= vo) pr = Math.pow(pr, 1.08);
+  const fee =
+    vo * cfg.sell_offer_fee_rate * Math.pow(4, po) +
+    vr * cfg.sell_requirement_fee_rate * Math.pow(4, pr);
+  return Number.isFinite(fee) ? Math.max(0, Math.round(fee)) : null;
+}
+
+function evaluateVerdict(
+  result: LookupResult,
+  hideoutLevels: Record<string, number>,
+  questMode: "pvp" | "pve" | "season",
+  fleaConfig: FleaConfig | null
+): Verdict {
+  const quests = result.used_in_tasks ?? [];
+  const active = quests.filter((q) => {
+    const s = projectedQuestStatus(q, questMode);
+    return s === "started" || s === "failed";
+  });
+  const future = quests.filter((q) => projectedQuestStatus(q, questMode) == null);
+  const futureKappa = future.filter((q) => q.kappa_required);
+  const levelsConfigured = Object.keys(hideoutLevels).length > 0;
+  const unfinishedHideout = (result.needed_for_hideout ?? []).filter(
+    (n) => !levelsConfigured || (hideoutLevels[n.station_id] ?? 0) < n.level
+  );
+  const bestTrader = result.sell_for?.[0] ??
+    (result.trader_price != null ? { name: "Trader", price: result.trader_price } : null);
+  const fee = estimateFleaFee(result.base_price, result.flea_price, fleaConfig);
+  const fleaNet = result.flea_price != null
+    ? Math.max(0, result.flea_price - (fee ?? 0))
+    : null;
+
+  if (active.length) {
+    const q = active[0];
+    const extra = (q.count ? " ×" + q.count : "") + (q.fir ? " • FiR" : "");
+    return { kind: "keep", label: "KEEP", reason: "Active quest: " + q.name + extra, fleaFee: fee, fleaNet, bestTrader };
+  }
+  if (futureKappa.length) {
+    return { kind: "keep", label: "KEEP", reason: "Kappa quest: " + futureKappa[0].name, fleaFee: fee, fleaNet, bestTrader };
+  }
+  if (unfinishedHideout.length) {
+    const n = unfinishedHideout[0];
+    return { kind: "keep", label: "KEEP", reason: "Hideout: " + n.station + " Lv" + n.level + " ×" + n.count, fleaFee: fee, fleaNet, bestTrader };
+  }
+  if (future.length) {
+    const q = future[0];
+    const extra = (q.count ? " ×" + q.count : "") + (q.fir ? " • FiR" : "");
+    return { kind: "keep", label: "KEEP", reason: "Future quest: " + q.name + extra, fleaFee: fee, fleaNet, bestTrader };
+  }
+  if (fleaNet != null && (!bestTrader || fleaNet > bestTrader.price)) {
+    const delta = bestTrader ? fleaNet - bestTrader.price : fleaNet;
+    return { kind: "flea", label: "SELL FLEA", reason: bestTrader ? "≈ +" + Math.round(delta).toLocaleString() + "₽ vs " + bestTrader.name : "Best cash value", fleaFee: fee, fleaNet, bestTrader };
+  }
+  if (bestTrader) {
+    return { kind: "trader", label: "SELL " + bestTrader.name.toUpperCase(), reason: fleaNet != null ? "≈ +" + Math.round(bestTrader.price - fleaNet).toLocaleString() + "₽ vs flea net" : "Best available cash sale", fleaFee: fee, fleaNet, bestTrader };
+  }
+  return { kind: "hold", label: "HOLD", reason: "No market/trader sale detected", fleaFee: fee, fleaNet, bestTrader };
+}
 type AmmoRound = {
   id: string | null;
   name: string;
@@ -253,6 +344,15 @@ type AmmoRound = {
 type AmmoCaliberData = { display: string; rounds: AmmoRound[] };
 type AmmoData = { calibers: Record<string, AmmoCaliberData> };
 
+async function fetchFleaConfig(gameMode: GameMode): Promise<FleaConfig | null> {
+  try {
+    const res = await fetch(PYTHON_API + "/flea/config?game_mode=" + encodeURIComponent(gameMode));
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 async function fetchAmmo(lang: Lang): Promise<AmmoData | null> {
   try {
     const res = await fetch(`${PYTHON_API}/ammo?lang=${lang}`);
@@ -785,6 +885,7 @@ function App() {
   // Null while loading; {calibers: {}} after a failed fetch (we still treat
   // both as "no matrix" for rendering).
   const [ammoData, setAmmoData] = useState<AmmoData | null>(null);
+  const [fleaConfig, setFleaConfig] = useState<FleaConfig | null>(null);
   const [cardVisible, setCardVisible] = useState(true);
   // Pin: locks window move (drag region off), resize (handle hidden) and the
   // ✕ button so a mid-raid misclick can't displace or close the overlay.
@@ -1379,6 +1480,15 @@ function App() {
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  // Fetch live flea fee coefficients through the local sidecar.
+  useEffect(() => {
+    let mounted = true;
+    fetchFleaConfig(region.gameMode).then((cfg) => {
+      if (mounted) setFleaConfig(cfg);
+    });
+    return () => { mounted = false; };
+  }, [region.gameMode]);
 
   // Load the ammo dataset once per language. The sidecar caches it server-
   // side; we cache it in component state so the matrix opens without a
@@ -3353,6 +3463,12 @@ function App() {
                   : null;
               const bestTraderName =
                 result.sell_for[0]?.name ?? null;
+              const verdict = evaluateVerdict(
+                result,
+                hideoutLevels,
+                questDisplayMode,
+                fleaConfig
+              );
               // Untradeable item (e.g. new quest keycards/items from a patch):
               // no flea AND no trader price. Show a clear notice instead of
               // two empty "—" rows that read like a malfunction.
@@ -3362,6 +3478,10 @@ function App() {
                 (result.sell_for?.length ?? 0) === 0;
               return (
                 <div className="prices">
+                  <div className={"verdict verdict-" + verdict.kind}>
+                    <div className="verdict-label">{verdict.label}</div>
+                    <div className="verdict-reason">{verdict.reason}</div>
+                  </div>
                   {noMarketPrice ? (
                     <div className="no-market-note">{t.noMarketPrice}</div>
                   ) : (
@@ -3388,6 +3508,18 @@ function App() {
                     </span>
                     <span className="value">{fmt(result.flea_price)}</span>
                   </div>
+                  {verdict.fleaFee != null && verdict.fleaNet != null && (
+                    <>
+                      <div className="price sub-price">
+                        <span className="label">Est. flea fee</span>
+                        <span className="value sub-value">-{fmt(verdict.fleaFee)}</span>
+                      </div>
+                      <div className="price sub-price flea-net-row">
+                        <span className="label">Est. flea net</span>
+                        <span className="value sub-value">{fmt(verdict.fleaNet)}</span>
+                      </div>
+                    </>
+                  )}
                   {region.show24hRange &&
                     (result.flea_low_24h != null ||
                       result.flea_high_24h != null) && (

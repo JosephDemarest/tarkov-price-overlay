@@ -44,6 +44,7 @@ from ocr import (
 )
 from quest_tracker import get_tracker
 from tarkov_api import (
+    get_flea_config,
     get_item_price,
     get_station_list,
     has_price_cache,
@@ -218,6 +219,7 @@ class LookupResponse(BaseModel):
     weight: float | None = None  # kg
     icon: str | None = None  # gridImageLink (webp URL)
     wiki: str | None = None  # Fandom wiki page (card link button)
+    base_price: int | None = None
     flea_price: int | None
     flea_low_24h: int | None = None
     flea_high_24h: int | None = None
@@ -320,6 +322,7 @@ def _build_response(
         weight=price.get("weight"),
         icon=price.get("icon"),
         wiki=price.get("wiki"),
+        base_price=price.get("base_price"),
         flea_price=price.get("flea"),
         flea_low_24h=price.get("flea_low_24h"),
         flea_high_24h=price.get("flea_high_24h"),
@@ -983,6 +986,16 @@ class QuestResetRequest(BaseModel):
     # old logs can't resurrect pre-wipe progress. For EFT wipes/season resets.
     # A later plain reset (from_now=False) clears the watermark again (undo).
     from_now: bool = False
+
+
+@app.get("/flea/config")
+def flea_config(game_mode: str = "regular") -> dict:
+    game_mode = game_mode if game_mode in ("regular", "pve", "pvp-season") else "regular"
+    try:
+        return get_flea_config(game_mode)
+    except Exception as e:
+        print(f"[flea] config fetch failed: {e!r}")
+        raise HTTPException(status_code=503, detail="flea_config_unavailable")
 
 
 @app.get("/hideout/stations")
