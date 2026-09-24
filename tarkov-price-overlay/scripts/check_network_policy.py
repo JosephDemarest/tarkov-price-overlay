@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIRS = [ROOT / "src", ROOT / "python-core", ROOT / "src-tauri"]
@@ -29,7 +28,7 @@ FORBIDDEN_STRINGS = {
 }
 
 violations: list[str] = []
-url_re = re.compile(r"https?://[^\s\"'<>)}\]]+")
+url_re = re.compile(r"https?://([A-Za-z0-9.-]+)(?::\\d+)?")
 
 for base in RUNTIME_DIRS:
     for path in base.rglob("*"):
@@ -40,9 +39,9 @@ for base in RUNTIME_DIRS:
         for needle, reason in FORBIDDEN_STRINGS.items():
             if needle in text:
                 violations.append(f"{rel}: forbidden {reason}: {needle}")
-        for raw in url_re.findall(text):
-            host = urlparse(raw.rstrip(".,;")).hostname
-            if host and host not in ALLOWED_HOSTS:
+        for host in url_re.findall(text):
+            host = host.lower()
+            if host not in ALLOWED_HOSTS:
                 violations.append(f"{rel}: network host not allowlisted: {host}")
 
 if violations:
