@@ -331,6 +331,9 @@ function evaluateVerdict(
   }
   return { kind: "hold", label: "HOLD", reason: "No market/trader sale detected", fleaFee: fee, fleaNet, bestTrader };
 }
+type StashBox = { x: number; y: number; width: number; height: number };
+type StashScanItem = { box: StashBox; confidence: number; raw_text: string; item: LookupResult };
+type StashScanResult = { width: number; height: number; detections: number; matched: number; items: StashScanItem[] };
 type AmmoRound = {
   id: string | null;
   name: string;
@@ -925,6 +928,10 @@ function App() {
   // leaves the card rect mid-drag (the window would otherwise eat the drag).
   const resizingRef = useRef(false);
   const [historyVisible, setHistoryVisible] = useState(false);
+  const [stashVisible, setStashVisible] = useState(false);
+  const [stashScanning, setStashScanning] = useState(false);
+  const [stashScan, setStashScan] = useState<StashScanResult | null>(null);
+  const [stashError, setStashError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
   const [questStatus, setQuestStatus] = useState<QuestStatus | null>(null);
   const [questPathInput, setQuestPathInput] = useState<string>("");
@@ -2112,6 +2119,53 @@ function App() {
     return { arrow, text: `${arrow} ${sign}${pct.toFixed(1)}%`, sign: pct };
   };
 
+  const scanVisibleStash = async () => {
+    if (stashScanning) return;
+    setStashScanning(true);
+    setStashError(null);
+    setShowSettings(false);
+    setHistoryVisible(false);
+    setStashVisible(true);
+    const win = getCurrentWindow();
+    try {
+      const cursor = await invoke<{ x: number; y: number }>("get_cursor_position");
+      const monitors = await availableMonitors();
+      const mon = monitors.find((m) =>
+        cursor.x >= m.position.x && cursor.x < m.position.x + m.size.width &&
+        cursor.y >= m.position.y && cursor.y < m.position.y + m.size.height
+      ) ?? (await primaryMonitor());
+      if (!mon) throw new Error("No monitor found");
+      const cropX = mon.position.x + Math.round(mon.size.width * 0.38);
+      const cropY = mon.position.y + Math.round(mon.size.height * 0.06);
+      const cropW = Math.round(mon.size.width * 0.60);
+      const cropH = Math.round(mon.size.height * 0.88);
+      await win.hide();
+      await new Promise((resolve) => window.setTimeout(resolve, 160));
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 90000);
+      try {
+        const res = await fetch(PYTHON_API + "/stash/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            x: cropX, y: cropY, width: cropW, height: cropH,
+            lang: getGameLang(region), game_mode: region.gameMode,
+          }),
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error("stash scan HTTP " + res.status);
+        setStashScan(await res.json());
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e) {
+      setStashError(e instanceof Error ? e.message : String(e));
+    } finally {
+      await invoke("show_overlay_passive").catch(() => {});
+      setCardVisible(true);
+      setStashScanning(false);
+    }
+  };
   const updateRegion = <K extends keyof Region>(key: K, value: Region[K]) =>
     setRegion((r) => ({ ...r, [key]: value }));
 
@@ -2386,7 +2440,16 @@ function App() {
             </span>
             <button
               className="settings-btn"
+              onClick={scanVisibleStash}
+              title="Scan visible stash"
+              disabled={stashScanning}
+            >
+              {stashScanning ? "…" : "📦"}
+            </button>
+            <button
+              className="settings-btn"
               onClick={() => {
+                setStashVisible(false);
                 setHistoryVisible((v) => {
                   // Opening history closes settings (and the donate panel
                   // beneath it) so the panels never stack.
@@ -2410,6 +2473,7 @@ function App() {
                   // Opening settings closes history so settings appears at
                   // the top of the card instead of being pushed down.
                   setHistoryVisible(false);
+                  setStashVisible(false);
                 }
                 return !s;
               })}
@@ -2484,6 +2548,63 @@ function App() {
         )}
 
 
+        {stashVisible && (
+          <div className="stash-panel">
+            <div className="history-header">
+              <span>📦 Stash batch scan</span>
+              <button className="settings-btn" onClick={() => setStashVisible(false)}>✕</button>
+            </div>
+            {stashScanning && <div className="history-empty">Scanning visible stash…</div>}
+            {stashError && <div className="history-empty">⚠ {stashError}</div>}
+            {!stashScanning && stashScan && (() => {
+              const ranked = stashScan.items.map((row) => {
+                const verdict = evaluateVerdict(row.item, hideoutLevels, questDisplayMode, fleaConfig);
+                const slots = Math.max(1, (row.item.width ?? 1) * (row.item.height ?? 1));
+                const bestCash = Math.max(verdict.fleaNet ?? 0, verdict.bestTrader?.price ?? 0);
+                return { ...row, verdict, bestCash, perSlot: bestCash / slots };
+              }).sort((a, b) => {
+                const keepDelta = Number(b.verdict.kind === "keep") - Number(a.verdict.kind === "keep");
+                return keepDelta || b.perSlot - a.perSlot;
+              });
+              const total = ranked.reduce((sum, r) => sum + r.bestCash, 0);
+              return (
+                <>
+                  <div className="stash-summary">
+                    <strong>{ranked.length}</strong> items matched · <strong>{fmt(total)}</strong> best-cash total
+                    <span className="stash-detections"> · {stashScan.detections} OCR detections</span>
+                  </div>
+                  <div className="stash-map" aria-label="stash value heatmap">
+                    {ranked.map((r, idx) => (
+                      <div
+                        key={(r.item.item_id ?? r.item.item_name ?? "item") + idx}
+                        className={"stash-map-hit stash-map-" + r.verdict.kind}
+                        style={{
+                          left: (100 * r.box.x / stashScan.width) + "%",
+                          top: (100 * r.box.y / stashScan.height) + "%",
+                          width: Math.max(1.5, 100 * r.box.width / stashScan.width) + "%",
+                          height: Math.max(1.2, 100 * r.box.height / stashScan.height) + "%",
+                        }}
+                        title={(r.item.short_name ?? r.item.item_name ?? r.raw_text) + " · " + r.verdict.label + " · " + fmt(Math.round(r.perSlot)) + "/slot"}
+                      />
+                    ))}
+                  </div>
+                  <div className="stash-list">
+                    {ranked.slice(0, 30).map((r, idx) => (
+                      <div className="stash-row" key={(r.item.item_id ?? r.item.item_name ?? "item") + "-row-" + idx}>
+                        <div className="stash-row-main">
+                          <span className={"stash-verdict stash-" + r.verdict.kind}>{r.verdict.label}</span>
+                          <span className="stash-name">{r.item.short_name ?? r.item.item_name ?? r.raw_text}</span>
+                        </div>
+                        <div className="stash-row-value">{fmt(Math.round(r.bestCash))} · {fmt(Math.round(r.perSlot))}/slot</div>
+                        <div className="stash-row-reason">{r.verdict.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
         {historyVisible && (
           <div className="history-panel">
             <div className="history-header">

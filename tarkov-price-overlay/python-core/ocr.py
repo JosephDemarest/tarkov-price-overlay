@@ -264,5 +264,37 @@ def recognize_text_fragments(
     return kept
 
 
+def recognize_text_boxes(
+    image: np.ndarray,
+    langs: tuple[str, ...] = ("ko", "en"),
+    min_confidence: float = 0.28,
+) -> list[dict]:
+    """OCR a large stash/inventory region and preserve detection geometry.
+
+    Unlike tooltip OCR this intentionally does not apply the dark-background
+    filter: stash item short names are painted directly over item icons.
+    """
+    reader = _get_reader(langs)
+    gray = _to_gray(image)
+    results = reader.readtext(gray, detail=1, paragraph=False, mag_ratio=1.0)
+    out: list[dict] = []
+    for bbox, text, conf in results:
+        text = (text or "").strip()
+        if not text or float(conf) < min_confidence:
+            continue
+        xs = [float(p[0]) for p in bbox]
+        ys = [float(p[1]) for p in bbox]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        out.append({
+            "text": text,
+            "confidence": float(conf),
+            "x": int(round(x0)),
+            "y": int(round(y0)),
+            "width": max(1, int(round(x1 - x0))),
+            "height": max(1, int(round(y1 - y0))),
+        })
+    return out
+
 def recognize_text(image: np.ndarray, langs: tuple[str, ...] = ("ko", "en")) -> str:
     return " ".join(recognize_text_fragments(image, langs)).strip()

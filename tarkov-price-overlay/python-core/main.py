@@ -39,6 +39,7 @@ from capture import capture_region
 from ocr import (
     _get_reader,
     is_price_or_status_line,
+    recognize_text_boxes,
     recognize_text_fragments,
     unwrap_nospace_item,
 )
@@ -96,6 +97,15 @@ def _reject_foreign_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin and not _allowed_origin.match(origin):
         raise HTTPException(status_code=403, detail="forbidden_origin")
+
+
+class StashScanRequest(BaseModel):
+    x: int
+    y: int
+    width: int = Field(ge=200, le=6000)
+    height: int = Field(ge=200, le=4000)
+    lang: str = "en"
+    game_mode: str = "regular"
 
 
 class CaptureRequest(BaseModel):
@@ -782,6 +792,54 @@ def _lookup_superseded(client_seq: int | None) -> bool:
         return False
     with _lookup_seq_lock:
         return client_seq < _lookup_seq
+
+
+@app.post("/stash/scan")
+def stash_scan(req: StashScanRequest) -> dict:
+    """Scan a visible stash region using only screen capture + local OCR/cache."""
+    if req.width * req.height > 16_000_000:
+        raise HTTPException(status_code=413, detail="scan_region_too_large")
+    lang = req.lang if req.lang in ("ko", "en", "ru") else "en"
+    game_mode = req.game_mode if req.game_mode in ("regular", "pve", "pvp-season") else "regular"
+    ocr_langs = ("ru", "en") if lang == "ru" else ("ko", "en")
+    image = capture_region(req.x, req.y, req.width, req.height)
+    boxes = recognize_text_boxes(image, langs=ocr_langs)
+    best_by_item: dict[str, dict] = {}
+    for box in boxes:
+        text = box["text"].strip()
+        if len(text) < 2 or is_price_or_status_line(text):
+            continue
+        price = get_item_price(
+            text,
+            lang=lang,
+            game_mode=game_mode,
+            allow_cold=False,
+        )
+        if not price.get("name"):
+            continue
+        key = price.get("id") or price["name"]
+        candidate = {
+            "box": {
+                "x": box["x"],
+                "y": box["y"],
+                "width": box["width"],
+                "height": box["height"],
+            },
+            "confidence": box["confidence"],
+            "raw_text": text,
+            "item": _build_response(text, price, game_mode).model_dump(),
+        }
+        prev = best_by_item.get(key)
+        if prev is None or candidate["confidence"] > prev["confidence"]:
+            best_by_item[key] = candidate
+    items = sorted(best_by_item.values(), key=lambda row: (row["box"]["y"], row["box"]["x"]))
+    return {
+        "width": req.width,
+        "height": req.height,
+        "detections": len(boxes),
+        "matched": len(items),
+        "items": items,
+    }
 
 
 @app.post("/lookup", response_model=LookupResponse)
