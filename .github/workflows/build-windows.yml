@@ -1,0 +1,125 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/privacy-stash-verdict
+    paths:
+      - .github/workflows/build-windows.yml
+  push:
+    tags:
+      - "v*-jd.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tarkov-price-overlay
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tarkov-price-overlay/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Create Python build environment
+        shell: pwsh
+        run: |
+          python -m venv python-core\.venv
+          $py = "python-core\.venv\Scripts\python.exe"
+          & $py -m pip install --upgrade pip
+          & $py -m pip install -r python-core\requirements.txt
+          & $py -m pip install pyinstaller
+          # EasyOCR/PyInstaller frozen builds are known-good with this CPU pair.
+          & $py -m pip install --index-url https://download.pytorch.org/whl/cpu --force-reinstall torch==2.7.1 torchvision==0.22.1
+
+      - name: Pre-download EasyOCR models for offline installs
+        shell: pwsh
+        run: |
+          Push-Location python-core
+          & ".\.venv\Scripts\python.exe" -c "from ocr import _get_reader; _get_reader(('ko','en')); _get_reader(('ru','en')); print('EasyOCR models ready')"
+          Pop-Location
+          Get-ChildItem python-core\models\easyocr | Format-Table Name,Length
+
+      - name: Build Python sidecar and NSIS installer
+        shell: pwsh
+        run: |
+          .\scripts\build.ps1 -SkipDeps -ForcePython
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          .\scripts\portable.ps1
+
+      - name: Generate SBOM
+        shell: pwsh
+        run: python scripts\generate_sbom.py
+
+      - name: Collect artifacts and SHA-256 hashes
+        shell: pwsh
+        run: |
+          $out = "release-artifacts"
+          New-Item -ItemType Directory -Force $out | Out-Null
+
+          $installer = Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer not found" }
+          Copy-Item $installer.FullName $out
+
+          $portable = Get-ChildItem "src-tauri\target\release\portable\*.zip" | Select-Object -First 1
+          if (-not $portable) { throw "Portable ZIP not found" }
+          Copy-Item $portable.FullName $out
+
+          Copy-Item "sbom.cdx.json" $out
+
+          $files = Get-ChildItem $out -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$h  $($f.Name)"
+          }
+          [IO.File]::WriteAllLines((Join-Path $out "SHA256SUMS.txt"), $lines, [Text.UTF8Encoding]::new($false))
+          Get-Content (Join-Path $out "SHA256SUMS.txt")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarkov-price-overlay-privacy-fork-windows
+          path: tarkov-price-overlay/release-artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish privacy-fork prerelease
+        if: github.ref == 'refs/heads/feat/privacy-stash-verdict'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.2.4-jd.1
+          target_commitish: ${{ github.sha }}
+          name: Tarkov Price Overlay Privacy Fork v1.2.4-jd.1
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            tarkov-price-overlay/release-artifacts/*
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            tarkov-price-overlay/release-artifacts/*

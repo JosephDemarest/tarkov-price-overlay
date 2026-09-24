@@ -54,7 +54,7 @@ if ($leftoverLib -gt 0) {
 }
 
 $stageRoot = Join-Path $releaseDir "portable"
-$stageName = "Tarkov Price Overlay_${version}_portable"
+$stageName = "Tarkov Price Overlay Privacy Fork_${version}_portable"
 $stageDir = Join-Path $stageRoot $stageName
 $zipPath = Join-Path $stageRoot "$stageName.zip"
 
@@ -63,7 +63,7 @@ if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 Write-Host "[portable] copying runtime files..."
-Copy-Item $mainExe (Join-Path $stageDir "Tarkov Price Overlay.exe")
+Copy-Item $mainExe (Join-Path $stageDir "Tarkov Price Overlay Privacy Fork.exe")
 # Rename the triple-suffixed externalBin to the runtime name the app spawns.
 Copy-Item $serverExe (Join-Path $stageDir "tarkov-server.exe")
 Copy-Item -Recurse $internalDir $stageDir
@@ -90,7 +90,7 @@ $utf8WithBom = New-Object System.Text.UTF8Encoding($true)
 # *second* copy at the default NSIS path (C:\Users\<user>\AppData\Local\...)
 # leaving their portable folder stuck at the old version.
 $markerPath = Join-Path $stageDir "_portable.marker"
-[System.IO.File]::WriteAllText($markerPath, "portable build v$version`r`nDo not delete — disables auto-updater so updates don't silently install elsewhere.`r`n", $utf8WithBom)
+[System.IO.File]::WriteAllText($markerPath, "Tarkov Price Overlay Privacy Fork portable build v$version`r`n", $utf8WithBom)
 
 Write-Host "[portable] zipping..."
 # Prefer 7-Zip when installed: several times faster than Compress-Archive

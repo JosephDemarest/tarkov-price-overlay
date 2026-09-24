@@ -1,8 +1,8 @@
 [package]
 name = "tarkov-price-overlay"
-version = "1.2.4"
-description = "Tarkov in-game item price overlay"
-authors = ["pado8"]
+version = "1.2.4-jd.1"
+description = "Privacy-focused Tarkov item price overlay fork"
+authors = ["pado8", "JosephDemarest"]
 edition = "2021"
 
 [lib]
