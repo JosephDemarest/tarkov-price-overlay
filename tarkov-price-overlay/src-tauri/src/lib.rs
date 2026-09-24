@@ -431,76 +431,6 @@ fn hide_preview_rect(app: tauri::AppHandle, label: String) -> Result<(), String>
     Ok(())
 }
 
-/// True when the running .exe is part of a portable ZIP distribution.
-///
-/// portable.ps1 drops a `_portable.marker` file next to the exe at build
-/// time; NSIS installs never have it. We use that to gate the in-app
-/// auto-updater: portable users get a "open downloads page" link instead
-/// of `update.downloadAndInstall()`, which would otherwise install a
-/// *second* copy at the default NSIS path and leave the portable folder
-/// pinned at the old version with no exe replacement.
-#[tauri::command]
-fn is_portable_install() -> bool {
-    let Ok(exe_path) = std::env::current_exe() else {
-        return false;
-    };
-    let Some(exe_dir) = exe_path.parent() else {
-        return false;
-    };
-    exe_dir.join("_portable.marker").exists()
-}
-
-/// Resolve the stable, machine-wide install id and persist it.
-///
-/// The id used to live ONLY in WebView2 localStorage, which a reinstall, a
-/// cache wipe, or a portable↔installer switch all clear — so one physical PC
-/// minted a brand-new id (and looked like a new user) on every such event,
-/// inflating the unique-user count. This stores it under
-/// `%PROGRAMDATA%\TarkovPriceOverlay\install_id`: machine-wide (shared across
-/// Windows accounts) and outside both the install dir and the WebView2 data
-/// folder, so it survives all of the above → one id per PC.
-///
-/// `candidate` is the caller's current localStorage id (a UUID). If the file
-/// already holds a valid id it wins — that's what keeps the id stable. Only
-/// when the file is absent/corrupt do we adopt `candidate`, which PROMOTES an
-/// existing user's localStorage id instead of resetting their identity. The
-/// caller mirrors the returned value back into localStorage so both stores
-/// agree. Best-effort: any filesystem failure falls back to returning
-/// `candidate`, so telemetry keeps working (just not PC-stable) rather than
-/// breaking.
-#[tauri::command]
-fn resolve_install_id(candidate: String) -> String {
-    let valid = |s: &str| -> bool {
-        s.len() == 36
-            && s.as_bytes().iter().enumerate().all(|(i, &b)| match i {
-                8 | 13 | 18 | 23 => b == b'-',
-                _ => b.is_ascii_hexdigit(),
-            })
-    };
-
-    let Some(program_data) = std::env::var_os("ProgramData") else {
-        return candidate;
-    };
-    let dir = std::path::Path::new(&program_data).join("TarkovPriceOverlay");
-    let file = dir.join("install_id");
-
-    // Existing machine id wins: this is what makes the id survive reinstall,
-    // cache wipe, portable↔installer, and second Windows accounts on the PC.
-    if let Ok(existing) = std::fs::read_to_string(&file) {
-        let existing = existing.trim();
-        if valid(existing) {
-            return existing.to_string();
-        }
-    }
-
-    // First run on this PC (or a corrupt file): adopt the caller's id so an
-    // existing user isn't reset, and persist it for next time.
-    let id = candidate.trim().to_string();
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(&file, &id);
-    id
-}
-
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle) {
     if let Some(state) = app.try_state::<IsQuitting>() {
@@ -720,8 +650,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -791,8 +719,6 @@ pub fn run() {
             recover_window_position,
             show_preview_rect,
             hide_preview_rect,
-            is_portable_install,
-            resolve_install_id,
             exit_app,
             relaunch_as_admin,
             show_overlay_passive

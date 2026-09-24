@@ -1573,3 +1573,39 @@ html, body, #root {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* Modified build marker required by the upstream MIT distribution note. */
+.privacy-badge {
+  margin-left: 0.35em;
+  font-size: 0.62em;
+  letter-spacing: 0.08em;
+  opacity: 0.72;
+  white-space: nowrap;
+}
+
+.verdict { margin: 0.35em 0 0.55em; padding: 0.5em 0.65em; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; background: rgba(255,255,255,0.045); }
+.verdict-label { font-weight: 800; letter-spacing: 0.06em; }
+.verdict-reason { margin-top: 0.18em; opacity: 0.78; font-size: 0.88em; }
+.verdict-keep .verdict-label { color: #8fd694; }
+.verdict-flea .verdict-label { color: #82c7ff; }
+.verdict-trader .verdict-label { color: #ffd47d; }
+.verdict-hold .verdict-label { color: #c9c9c9; }
+.flea-net-row .value { font-weight: 700; }
+
+.stash-panel { padding: 0.55em 0.65em 0.7em; }
+.stash-summary { margin: 0.45em 0; font-size: 0.9em; opacity: 0.9; }
+.stash-detections { opacity: 0.6; }
+.stash-map { position: relative; height: 130px; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; background: rgba(0,0,0,0.35); overflow: hidden; margin-bottom: 0.55em; }
+.stash-map-hit { position: absolute; min-width: 3px; min-height: 3px; border-radius: 2px; opacity: 0.82; }
+.stash-map-keep { background: #69c878; }
+.stash-map-flea { background: #58b7ff; }
+.stash-map-trader { background: #e5b95e; }
+.stash-map-hold { background: #aaa; }
+.stash-list { max-height: 240px; overflow-y: auto; }
+.stash-row { padding: 0.42em 0.2em; border-bottom: 1px solid rgba(255,255,255,0.07); }
+.stash-row-main { display: flex; gap: 0.45em; align-items: baseline; }
+.stash-verdict { font-weight: 800; font-size: 0.78em; min-width: 6.2em; }
+.stash-keep { color: #8fd694; } .stash-flea { color: #82c7ff; } .stash-trader { color: #ffd47d; } .stash-hold { color: #bbb; }
+.stash-name { font-weight: 600; }
+.stash-row-value { font-size: 0.86em; opacity: 0.9; margin-top: 0.1em; }
+.stash-row-reason { font-size: 0.78em; opacity: 0.62; margin-top: 0.08em; }

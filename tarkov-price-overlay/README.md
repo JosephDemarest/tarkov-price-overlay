@@ -1,12 +1,16 @@
 # Tarkov Price Overlay
 
+> [!IMPORTANT]
+> **JosephDemarest privacy fork.** This modified build removes upstream telemetry, the persistent install identifier, remote announcements/feedback upload, and the upstream automatic updater. It is not an official pado8 binary. See [PRIVACY.md](PRIVACY.md).
+
+
 > **타르코프에서 마우스 올리고 F2** — 플리 시세 · 상인가 · 바터 · 제작 · 퀘스트 정보를 게임 위에 바로 띄워주는 **오픈소스 무료** Windows 오버레이 앱
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Open Source](https://img.shields.io/badge/Open-Source-brightgreen)](https://github.com/pado8/tarkov-price-overlay)
 [![Built on tarkov.dev](https://img.shields.io/badge/Built%20on-tarkov.dev-c8aa64)](https://tarkov.dev)
 
-**[⬇ 최신 버전 다운로드](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)** · 한국어 / English
+**[⬇ 최신 버전 다운로드](https://github.com/JosephDemarest/tarkov-price-overlay/releases)** · 한국어 / English
 
 > ⚠️ **공식 다운로드는 위 링크 한 곳뿐입니다.**
 > 다른 곳에서 다운받지 마세요 — 코드는 [`pado8/tarkov-price-overlay`](https://github.com/pado8/tarkov-price-overlay)에서 공개되어 있으며, 빌드 결과물은 위 Releases 페이지에서만 배포합니다.
@@ -80,19 +84,13 @@
 다만 **BSG/BattlEye가 명시적으로 허용한 도구는 아닙니다.** 정책은 언제든 바뀔 수 있으므로 사용에 따른 책임은 본인에게 있습니다. 현재까지 동일한 방식의 오버레이 도구로 밴된 사례는 보고된 바 없으나, 100% 보장은 누구도 할 수 없습니다.
 
 ### 🔏 개인정보 / 수집 데이터
-앱 개선과 사용 규모 파악을 위해 **익명 사용 통계**만 수집합니다 (Vercel + Neon, 엔드포인트 `api.aquapado.com/priceoverlay/events`).
-
-- ✅ 수집: 앱 실행/F2 사용 횟수, 앱 버전, 국가 코드, 익명 설치 ID(무작위 UUID, 재설치 시 변경), 관리자 권한 실행 여부, 조회 실패 유형(empty/junk/no_match 카테고리만)
-- ✅ 조회 실패/시세 없음 시: 매칭된 **공개 아이템 ID**(검색어·OCR 텍스트 아님 — 패치 후 신규 아이템 자동 감지용)
-- ❌ 절대 수집 안 함: 검색한 아이템 이름, 화면, 마우스 좌표, 게임 내용, 개인정보, IP
-- ⚙️ opt-out — 기본 ON, 첫 실행 1회 안내, 설정에서 끄기 가능. 피드백(설정 → ✉)도 같은 백엔드에 저장됨
-- 🔓 수집 코드는 `src/App.tsx`의 `reportEvent` 참고
+이 포크는 **원격 사용 통계를 전혀 전송하지 않습니다.** 설치 ID, 조회 이벤트, 원격 공지, 피드백 업로드, 백그라운드 자동 업데이트를 제거했습니다. 자세한 내용은 [PRIVACY.md](PRIVACY.md)를 참고하세요.
 
 ---
 
 ## 📦 다운로드
 
-**[Releases 페이지](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)** 에서 둘 중 하나를 받습니다:
+**[이 포크의 Releases 페이지](https://github.com/JosephDemarest/tarkov-price-overlay/releases)** 에서 둘 중 하나를 받습니다:
 
 - **인스톨러** (`*-x64-setup.exe`) — 설치 마법사 권장
 - **포터블** (`*-portable.zip`) — 압축 풀고 `tarkov-price-overlay.exe` 바로 실행
@@ -233,7 +231,7 @@ A. 위 "안전성" 섹션 참조. 화면 캡처 + OCR 방식이라 메모리 핵
 A. 트레이로 숨김. 다시 띄우려면 F2 또는 트레이 아이콘 클릭. 완전 종료는 트레이 아이콘 우클릭 → 종료.
 
 **Q. 의견·버그 제보는 어디에 하나요?**
-A. [GitHub Issues](https://github.com/pado8/tarkov-price-overlay-releases/issues) 또는 이메일 floe9235@gmail.com
+A. [GitHub Issues](https://github.com/JosephDemarest/tarkov-price-overlay/issues) 또는 이메일 floe9235@gmail.com
 
 ---
 
@@ -348,7 +346,7 @@ A. [GitHub Issues](https://github.com/pado8/tarkov-price-overlay-releases/issues
 
 > **Hover an item in Tarkov, press F2** — instantly see flea market prices, trader prices, barters, crafts, and quest requirements as a transparent overlay on top of the game.
 
-**[⬇ Download Latest](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)** · Free · Windows
+**[⬇ Download Latest](https://github.com/JosephDemarest/tarkov-price-overlay/releases)** · Free · Windows
 
 ---
 
@@ -411,7 +409,7 @@ That said, **this tool is not officially sanctioned by BSG/BattlEye**. Their pol
 
 ## 📦 Download
 
-Grab one from **[Releases](https://github.com/pado8/tarkov-price-overlay-releases/releases/latest)**:
+Grab one from **[Releases](https://github.com/JosephDemarest/tarkov-price-overlay/releases)**:
 
 - **Installer** (`*-x64-setup.exe`) — recommended
 - **Portable** (`*-portable.zip`) — extract and run `tarkov-price-overlay.exe`
@@ -515,7 +513,7 @@ A. See "Safety" section above. Screen capture + OCR is fundamentally different f
 A. Hides to the system tray. Press F2 or click the tray icon to bring it back. Right-click the tray icon → Exit to fully quit.
 
 **Q. Bug reports / feedback?**
-A. Open a [GitHub Issue](https://github.com/pado8/tarkov-price-overlay-releases/issues) or email floe9235@gmail.com.
+A. Open a [GitHub Issue](https://github.com/JosephDemarest/tarkov-price-overlay/issues) or email floe9235@gmail.com.
 
 ---
 

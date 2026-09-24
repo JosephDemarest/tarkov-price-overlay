@@ -386,6 +386,7 @@ def fetch_catalog(lang: str, game_mode: str) -> tuple[list[dict], dict, list[dic
             "types": it.get("types") or [],
             "properties": gql_props,
             "containsItems": contains,
+            "basePrice": it.get("basePrice"),
             "avg24hPrice": it.get("avg24hPrice"),
             "low24hPrice": it.get("low24hPrice"),
             "high24hPrice": it.get("high24hPrice"),

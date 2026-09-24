@@ -7,6 +7,18 @@ import requests
 
 TARKOV_API_URL = "https://api.tarkov.dev/graphql"
 
+_QUERY_FLEA_CONFIG = """
+query FleaConfig($gameMode: GameMode) {
+  fleaMarket(gameMode: $gameMode) {
+    sellOfferFeeRate
+    sellRequirementFeeRate
+  }
+}
+"""
+
+_flea_config_lock = threading.Lock()
+_flea_config_cache: dict[str, tuple[float, dict]] = {}
+
 # Background bulk-cache configuration. The whole tarkov.dev item catalog
 # (per language × per game mode) is fetched periodically so that /lookup
 # becomes a hashmap lookup + an optional fuzzy match - no per-item network
@@ -48,6 +60,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
     high24hPrice
     lastLowPrice
     lastOfferCount
+    basePrice
     changeLast48hPercent
     sellFor {
       priceRUB
@@ -186,6 +199,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
     high24hPrice
     lastLowPrice
     lastOfferCount
+    basePrice
     changeLast48hPercent
     sellFor {
       priceRUB
@@ -394,6 +408,32 @@ def _fetch_ammo(lang: str) -> dict:
         slot["rounds"].sort(key=lambda r: r["penetration"], reverse=True)
 
     return {"calibers": by_caliber}
+
+
+def get_flea_config(game_mode: str = "regular") -> dict:
+    """Return live flea fee coefficients from tarkov.dev."""
+    gm = "regular" if game_mode == "pvp-season" else game_mode
+    now = time.time()
+    with _flea_config_lock:
+        cached = _flea_config_cache.get(gm)
+        if cached and now - cached[0] < CACHE_TTL_SEC:
+            return dict(cached[1])
+    response = requests.post(
+        TARKOV_API_URL,
+        json={"query": _QUERY_FLEA_CONFIG, "variables": {"gameMode": gm}},
+        timeout=15,
+    )
+    response.raise_for_status()
+    flea = (response.json().get("data") or {}).get("fleaMarket") or {}
+    out = {
+        "sell_offer_fee_rate": float(flea.get("sellOfferFeeRate") or 0.0),
+        "sell_requirement_fee_rate": float(flea.get("sellRequirementFeeRate") or 0.0),
+    }
+    if out["sell_offer_fee_rate"] <= 0 or out["sell_requirement_fee_rate"] <= 0:
+        raise RuntimeError("tarkov.dev returned invalid flea fee coefficients")
+    with _flea_config_lock:
+        _flea_config_cache[gm] = (now, out)
+    return dict(out)
 
 
 def get_ammo(lang: str) -> dict:
@@ -737,6 +777,7 @@ def _build_cache_entry(item: dict, hideout_idx: dict[str, list[dict]]) -> dict:
         # Fandom wiki page for the item — surfaced as a link button on the card
         # (requested twice via in-app feedback). Present in both sources.
         "wiki": item.get("wikiLink"),
+        "base_price": item.get("basePrice"),
         "flea": item.get("avg24hPrice"),
         "flea_low_24h": item.get("low24hPrice"),
         "flea_high_24h": item.get("high24hPrice"),
@@ -963,6 +1004,7 @@ def _empty_result(matched_from: str | None = None) -> dict:
         "height": None,
         "weight": None,
         "icon": None,
+        "base_price": None,
         "flea": None,
         "flea_low_24h": None,
         "flea_high_24h": None,

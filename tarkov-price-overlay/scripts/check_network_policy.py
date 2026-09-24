@@ -1,0 +1,57 @@
+"""Static privacy/security policy gate for runtime source."""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIRS = [ROOT / "src", ROOT / "python-core", ROOT / "src-tauri"]
+ALLOWED_HOSTS = {
+    "127.0.0.1",
+    "localhost",
+    "api.tarkov.dev",
+    "json.tarkov.dev",
+    "github.com",
+    "paypal.me",
+    "qr.kakaopay.com",
+    "schema.tauri.app",
+    "tauri.localhost",
+}
+FORBIDDEN_STRINGS = {
+    "api.aquapado.com": "upstream telemetry/control-plane host",
+    "ReadProcessMemory": "game/process memory access",
+    "WriteProcessMemory": "game/process memory write",
+    "CreateRemoteThread": "process injection",
+    "VirtualAllocEx": "process injection",
+    "NtReadVirtualMemory": "game/process memory access",
+    "SetWindowsHookEx": "low-level Windows hook",
+}
+
+violations: list[str] = []
+url_re = re.compile(r"https?://([A-Za-z0-9.-]+)(?::\\d+)?")
+
+for base in RUNTIME_DIRS:
+    for path in base.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".py", ".rs", ".ts", ".tsx", ".json", ".toml"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rel = path.relative_to(ROOT)
+        for needle, reason in FORBIDDEN_STRINGS.items():
+            if needle in text:
+                violations.append(f"{rel}: forbidden {reason}: {needle}")
+        # quest_tracker.py only parses URLs already written by EFT into log
+        # files; it does not make network requests. Avoid treating its regex
+        # pattern (https://gw-...) as an outbound host.
+        if rel.as_posix() != "python-core/quest_tracker.py":
+            for host in url_re.findall(text):
+                host = host.lower()
+                if host not in ALLOWED_HOSTS:
+                    violations.append(f"{rel}: network host not allowlisted: {host}")
+
+if violations:
+    print("Privacy/security policy violations:")
+    print("\n".join(f" - {v}" for v in violations))
+    sys.exit(1)
+
+print("Runtime network/privacy policy OK")

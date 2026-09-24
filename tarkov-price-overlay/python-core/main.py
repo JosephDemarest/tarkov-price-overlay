@@ -39,11 +39,13 @@ from capture import capture_region
 from ocr import (
     _get_reader,
     is_price_or_status_line,
+    recognize_text_boxes,
     recognize_text_fragments,
     unwrap_nospace_item,
 )
 from quest_tracker import get_tracker
 from tarkov_api import (
+    get_flea_config,
     get_item_price,
     get_station_list,
     has_price_cache,
@@ -73,7 +75,7 @@ app = FastAPI(title="Tarkov Price Overlay Core", lifespan=lifespan)
 # Restricting to the Tauri webview origin makes /lookup (a JSON POST, always
 # preflighted) un-sendable from a foreign origin. Windows Tauri 2 serves the
 # app from http://tauri.localhost; `npm run dev` serves from localhost:1420.
-_ALLOWED_ORIGIN_RE = r"^(https?://(tauri\.localhost|localhost)(:\d+)?|tauri://localhost)$"
+_ALLOWED_ORIGIN_RE = r"^(https?://tauri\.localhost|tauri://localhost|http://localhost:1420)$"
 _allowed_origin = re.compile(_ALLOWED_ORIGIN_RE)
 
 app.add_middleware(
@@ -95,6 +97,15 @@ def _reject_foreign_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin and not _allowed_origin.match(origin):
         raise HTTPException(status_code=403, detail="forbidden_origin")
+
+
+class StashScanRequest(BaseModel):
+    x: int
+    y: int
+    width: int = Field(ge=200, le=6000)
+    height: int = Field(ge=200, le=4000)
+    lang: str = "en"
+    game_mode: str = "regular"
 
 
 class CaptureRequest(BaseModel):
@@ -218,6 +229,7 @@ class LookupResponse(BaseModel):
     weight: float | None = None  # kg
     icon: str | None = None  # gridImageLink (webp URL)
     wiki: str | None = None  # Fandom wiki page (card link button)
+    base_price: int | None = None
     flea_price: int | None
     flea_low_24h: int | None = None
     flea_high_24h: int | None = None
@@ -320,6 +332,7 @@ def _build_response(
         weight=price.get("weight"),
         icon=price.get("icon"),
         wiki=price.get("wiki"),
+        base_price=price.get("base_price"),
         flea_price=price.get("flea"),
         flea_low_24h=price.get("flea_low_24h"),
         flea_high_24h=price.get("flea_high_24h"),
@@ -781,6 +794,76 @@ def _lookup_superseded(client_seq: int | None) -> bool:
         return client_seq < _lookup_seq
 
 
+@app.post("/stash/scan")
+def stash_scan(req: StashScanRequest) -> dict:
+    """Scan a visible stash region using only screen capture + local OCR/cache."""
+    if req.width * req.height > 16_000_000:
+        raise HTTPException(status_code=413, detail="scan_region_too_large")
+    lang = req.lang if req.lang in ("ko", "en", "ru") else "en"
+    game_mode = req.game_mode if req.game_mode in ("regular", "pve", "pvp-season") else "regular"
+    ocr_langs = ("ru", "en") if lang == "ru" else ("ko", "en")
+    image = capture_region(req.x, req.y, req.width, req.height)
+    boxes = recognize_text_boxes(image, langs=ocr_langs)
+    matched: list[dict] = []
+    for box in boxes:
+        text = box["text"].strip()
+        if len(text) < 2 or is_price_or_status_line(text):
+            continue
+        price = get_item_price(
+            text,
+            lang=lang,
+            game_mode=game_mode,
+            allow_cold=False,
+        )
+        if not price.get("name"):
+            continue
+        key = price.get("id") or price["name"]
+        candidate = {
+            "_key": key,
+            "box": {
+                "x": box["x"],
+                "y": box["y"],
+                "width": box["width"],
+                "height": box["height"],
+            },
+            "confidence": box["confidence"],
+            "raw_text": text,
+            "item": _build_response(text, price, game_mode).model_dump(),
+        }
+
+        # EasyOCR can emit overlapping alternatives for one label. Collapse
+        # those, but DO NOT collapse separate copies of the same item elsewhere
+        # in the stash — ten Wires should count as ten Wires.
+        duplicate_idx: int | None = None
+        for idx, prev in enumerate(matched):
+            if prev["_key"] != key:
+                continue
+            a, b = candidate["box"], prev["box"]
+            acx, acy = a["x"] + a["width"] / 2, a["y"] + a["height"] / 2
+            bcx, bcy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+            if (
+                abs(acx - bcx) <= max(a["width"], b["width"])
+                and abs(acy - bcy) <= max(a["height"], b["height"])
+            ):
+                duplicate_idx = idx
+                break
+        if duplicate_idx is None:
+            matched.append(candidate)
+        elif candidate["confidence"] > matched[duplicate_idx]["confidence"]:
+            matched[duplicate_idx] = candidate
+
+    items = sorted(matched, key=lambda row: (row["box"]["y"], row["box"]["x"]))
+    for row in items:
+        row.pop("_key", None)
+    return {
+        "width": req.width,
+        "height": req.height,
+        "detections": len(boxes),
+        "matched": len(items),
+        "items": items,
+    }
+
+
 @app.post("/lookup", response_model=LookupResponse)
 def lookup(req: CaptureRequest) -> LookupResponse:
     # Register this press as early as possible (before the blocking cursor
@@ -983,6 +1066,16 @@ class QuestResetRequest(BaseModel):
     # old logs can't resurrect pre-wipe progress. For EFT wipes/season resets.
     # A later plain reset (from_now=False) clears the watermark again (undo).
     from_now: bool = False
+
+
+@app.get("/flea/config")
+def flea_config(game_mode: str = "regular") -> dict:
+    game_mode = game_mode if game_mode in ("regular", "pve", "pvp-season") else "regular"
+    try:
+        return get_flea_config(game_mode)
+    except Exception as e:
+        print(f"[flea] config fetch failed: {e!r}")
+        raise HTTPException(status_code=503, detail="flea_config_unavailable")
 
 
 @app.get("/hideout/stations")
