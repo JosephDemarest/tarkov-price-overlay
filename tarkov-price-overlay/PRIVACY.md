@@ -14,11 +14,13 @@ The application does not read Escape from Tarkov process memory, inject DLLs, in
 
 ## Runtime network allowlist
 
-Background/application data traffic is limited to:
+Hard-coded background/application data endpoints are limited to:
 
 - `127.0.0.1:8765` — the bundled local OCR/data sidecar.
 - `api.tarkov.dev` — Tarkov catalog/pricing data.
 - `json.tarkov.dev` — fallback Tarkov catalog/pricing data.
+
+Remote item icons are **disabled by default**. If the user explicitly enables "Remote item icons", the webview may fetch the per-item `gridImageLink` URL returned by tarkov.dev; that URL's host is data-driven rather than hard-coded in this repository.
 
 Links to GitHub, item wiki pages, PayPal, or KakaoPay are opened only after an explicit user click. The application does not send analytics to those destinations.
 

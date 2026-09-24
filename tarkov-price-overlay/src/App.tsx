@@ -14,6 +14,7 @@ const APP_VERSION = __APP_VERSION__;
 const ADMIN_BANNER_DISMISS_KEY = "tarkov.adminBannerDismissed";
 // Hideout levels: {[stationId]: currentLevel}. Persisted across sessions.
 const HIDEOUT_LEVELS_KEY = "tarkov.hideoutLevels";
+const REMOTE_ICONS_KEY = "tarkov.remoteItemIcons";
 // This privacy fork never performs background update checks. These links are
 // opened only after an explicit user click.
 const RELEASES_PAGE_URL = "https://github.com/JosephDemarest/tarkov-price-overlay/releases";
@@ -927,6 +928,9 @@ function App() {
   // click-through poll from re-enabling pass-through when the cursor briefly
   // leaves the card rect mid-drag (the window would otherwise eat the drag).
   const resizingRef = useRef(false);
+  const [remoteItemIcons, setRemoteItemIcons] = useState(
+    () => localStorage.getItem(REMOTE_ICONS_KEY) === "true"
+  );
   const [historyVisible, setHistoryVisible] = useState(false);
   const [stashVisible, setStashVisible] = useState(false);
   const [stashScanning, setStashScanning] = useState(false);
@@ -1461,6 +1465,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(SOUND_KEY, String(soundOn));
   }, [soundOn]);
+
+  useEffect(() => {
+    localStorage.setItem(REMOTE_ICONS_KEY, String(remoteItemIcons));
+  }, [remoteItemIcons]);
 
   // Probe sidecar diagnostics on mount, retrying until it answers (the sidecar
   // can take >3s on a cold start while it loads OCR models). Drives the admin-
@@ -2960,6 +2968,14 @@ function App() {
                 <span className="opacity-readout">{region.bgOpacity}%</span>
               </div>
             </div>
+            <div className="settings-row">
+              <label title="Loads the item image URL returned by tarkov.dev. Off by default in this privacy fork.">Remote item icons</label>
+              <input
+                type="checkbox"
+                checked={remoteItemIcons}
+                onChange={(e) => setRemoteItemIcons(e.target.checked)}
+              />
+            </div>
             <div className="settings-row" title={t.pinHint}>
               <label>📌 {t.pinWindow}</label>
               <input
@@ -3502,7 +3518,7 @@ function App() {
         {!showSettings && status === "success" && result && (
           <div className="result">
             <div className="item-row">
-              {result.icon && (
+              {remoteItemIcons && result.icon && (
                 <img
                   className="item-icon"
                   src={result.icon}
