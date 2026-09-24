@@ -804,7 +804,7 @@ def stash_scan(req: StashScanRequest) -> dict:
     ocr_langs = ("ru", "en") if lang == "ru" else ("ko", "en")
     image = capture_region(req.x, req.y, req.width, req.height)
     boxes = recognize_text_boxes(image, langs=ocr_langs)
-    best_by_item: dict[str, dict] = {}
+    matched: list[dict] = []
     for box in boxes:
         text = box["text"].strip()
         if len(text) < 2 or is_price_or_status_line(text):
@@ -819,6 +819,7 @@ def stash_scan(req: StashScanRequest) -> dict:
             continue
         key = price.get("id") or price["name"]
         candidate = {
+            "_key": key,
             "box": {
                 "x": box["x"],
                 "y": box["y"],
@@ -829,10 +830,31 @@ def stash_scan(req: StashScanRequest) -> dict:
             "raw_text": text,
             "item": _build_response(text, price, game_mode).model_dump(),
         }
-        prev = best_by_item.get(key)
-        if prev is None or candidate["confidence"] > prev["confidence"]:
-            best_by_item[key] = candidate
-    items = sorted(best_by_item.values(), key=lambda row: (row["box"]["y"], row["box"]["x"]))
+
+        # EasyOCR can emit overlapping alternatives for one label. Collapse
+        # those, but DO NOT collapse separate copies of the same item elsewhere
+        # in the stash — ten Wires should count as ten Wires.
+        duplicate_idx: int | None = None
+        for idx, prev in enumerate(matched):
+            if prev["_key"] != key:
+                continue
+            a, b = candidate["box"], prev["box"]
+            acx, acy = a["x"] + a["width"] / 2, a["y"] + a["height"] / 2
+            bcx, bcy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+            if (
+                abs(acx - bcx) <= max(a["width"], b["width"])
+                and abs(acy - bcy) <= max(a["height"], b["height"])
+            ):
+                duplicate_idx = idx
+                break
+        if duplicate_idx is None:
+            matched.append(candidate)
+        elif candidate["confidence"] > matched[duplicate_idx]["confidence"]:
+            matched[duplicate_idx] = candidate
+
+    items = sorted(matched, key=lambda row: (row["box"]["y"], row["box"]["x"]))
+    for row in items:
+        row.pop("_key", None)
     return {
         "width": req.width,
         "height": req.height,
