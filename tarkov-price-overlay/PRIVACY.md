@@ -31,3 +31,7 @@ Quest synchronization reads Escape from Tarkov log files from the detected/user-
 ## Updates
 
 This fork deliberately has no background updater. Use the repository Releases page manually and verify release hashes/provenance before installing.
+
+## CI enforcement
+
+`scripts/check_network_policy.py` scans runtime source on every push/PR. It rejects the removed telemetry host, non-allowlisted hard-coded network hosts, and common process-memory/injection APIs. This is intended to make privacy regressions visible during future upstream merges.

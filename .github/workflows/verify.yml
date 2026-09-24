@@ -1,0 +1,51 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-and-python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tarkov-price-overlay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tarkov-price-overlay/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: TypeScript/Vite build
+        run: npm run build
+      - name: Python syntax check
+        run: python -m compileall -q python-core
+      - name: Enforce privacy/network policy
+        run: python scripts/check_network_policy.py
+      - name: Generate deterministic SBOM
+        run: python scripts/generate_sbom.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: tarkov-price-overlay/sbom.cdx.json
+
+  rust:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tarkov-price-overlay
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml

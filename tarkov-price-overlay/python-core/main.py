@@ -75,7 +75,7 @@ app = FastAPI(title="Tarkov Price Overlay Core", lifespan=lifespan)
 # Restricting to the Tauri webview origin makes /lookup (a JSON POST, always
 # preflighted) un-sendable from a foreign origin. Windows Tauri 2 serves the
 # app from http://tauri.localhost; `npm run dev` serves from localhost:1420.
-_ALLOWED_ORIGIN_RE = r"^(https?://(tauri\.localhost|localhost)(:\d+)?|tauri://localhost)$"
+_ALLOWED_ORIGIN_RE = r"^(https?://tauri\.localhost|tauri://localhost|http://localhost:1420)$"
 _allowed_origin = re.compile(_ALLOWED_ORIGIN_RE)
 
 app.add_middleware(
